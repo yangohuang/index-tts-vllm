@@ -24,6 +24,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from indextts.BigVGAN.models import BigVGAN as Generator
+from indextts.audio_utils import save_pcm16_waveform
 from indextts.gpt.model_vllm_v2 import UnifiedVoice
 from indextts.utils.checkpoint import load_checkpoint
 from indextts.utils.feature_extractors import MelSpectrogramFeatures
@@ -475,7 +476,7 @@ class IndexTTS2:
                 logger.info(f">> remove old wav file: {output_path}")
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
+            save_pcm16_waveform(output_path, wav, sampling_rate)
             logger.info(f">> wav file saved to: {output_path}")
             return output_path
         else:
