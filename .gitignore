@@ -17,3 +17,5 @@ checkpoints/*
 output.wav
 
 logs/
+docs/superpowers/
+webui_v2_6007.log
