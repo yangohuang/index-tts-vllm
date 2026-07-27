@@ -1,0 +1,73 @@
+import numpy as np
+import pytest
+import torch
+
+from indextts.streaming import (
+    DEFAULT_STREAM_CHUNK_TOKENS,
+    MAX_STREAM_CHUNK_TOKENS,
+    MIN_STREAM_CHUNK_TOKENS,
+    PCM16_SAMPLE_WIDTH,
+    StreamMetrics,
+    StreamingPcmSmoother,
+    pcm16le_bytes,
+    validate_stream_chunk_tokens,
+)
+
+
+@pytest.mark.parametrize("value", [10, 20, 100])
+def test_validate_stream_chunk_tokens_accepts_supported_values(value):
+    assert validate_stream_chunk_tokens(value) == value
+
+
+@pytest.mark.parametrize("value", [9, 101, 20.5, "20", True])
+def test_validate_stream_chunk_tokens_rejects_unsupported_values(value):
+    with pytest.raises(ValueError):
+        validate_stream_chunk_tokens(value)
+
+
+def test_pcm16le_bytes_clips_and_encodes_little_endian():
+    waveform = torch.tensor([-40000.0, -1.0, 0.0, 1.0, 40000.0])
+    encoded = pcm16le_bytes(waveform)
+    decoded = np.frombuffer(encoded, dtype="<i2")
+    np.testing.assert_array_equal(decoded, [-32767, -1, 0, 1, 32767])
+    assert len(encoded) % PCM16_SAMPLE_WIDTH == 0
+
+
+def test_smoother_holds_overlap_until_next_prefix_and_flushes_tail():
+    smoother = StreamingPcmSmoother(hop_length=4, overlap_mel_frames=2)
+
+    first = smoother.push(torch.arange(16, dtype=torch.float32), is_final=False)
+    second = smoother.push(torch.arange(24, dtype=torch.float32), is_final=False)
+    tail = smoother.flush()
+
+    assert first.numel() == 8
+    assert second.numel() > 0
+    assert tail.numel() == 8
+    assert smoother.flush().numel() == 0
+
+
+def test_smoother_rejects_prefix_shorter_than_committed_audio():
+    smoother = StreamingPcmSmoother(hop_length=4, overlap_mel_frames=2)
+    smoother.push(torch.arange(16, dtype=torch.float32), is_final=False)
+    with pytest.raises(ValueError, match="prefix"):
+        smoother.push(torch.arange(4, dtype=torch.float32), is_final=False)
+
+
+def test_smoother_final_push_commits_everything_and_clears_tail():
+    smoother = StreamingPcmSmoother(hop_length=4, overlap_mel_frames=2)
+    smoother.push(torch.arange(16, dtype=torch.float32), is_final=False)
+    final = smoother.push(torch.arange(20, dtype=torch.float32), is_final=True)
+    assert final.numel() == 12
+    assert smoother.flush().numel() == 0
+
+
+def test_stream_metrics_summary_reports_ttfa_and_rtf():
+    metrics = StreamMetrics(started_at=100.0)
+    metrics.record_chunk(b"\x00" * 44100, now=100.5)
+    metrics.record_chunk(b"\x00" * 44100, now=101.0)
+    summary = metrics.summary(now=102.0)
+    assert summary["ttfa_ms"] == pytest.approx(500.0)
+    assert summary["audio_duration_ms"] == pytest.approx(2000.0)
+    assert summary["rtf"] == pytest.approx(1.0)
+    assert summary["chunks"] == 2
+    assert summary["cancelled"] is False
