@@ -6,9 +6,37 @@
 </div>
 
 ## Introduction
-This project re-implements the GPT model's inference from [index-tts](https://github.com/index-tts/index-tts) using the vllm library, accelerating the inference process of index-tts.
 
-Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
+This project is built on top of [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm). The upstream project re-implements the GPT model's inference from [index-tts](https://github.com/index-tts/index-tts) using vLLM, greatly accelerating inference; on top of that, this project **adds production-ready low-latency streaming TTS for IndexTTS2**: without touching any model weights, it cuts time-to-first-audio (TTFA) from ~4 s down to **0.6–0.7 s**, exposed via both HTTP and WebSocket streaming APIs.
+
+## Core Work and Optimizations in This Project
+
+Upstream solved "how fast can the GPT decode"; this project solves "**how fast does the first audio arrive, and how clean does the stream sound**". The core contributions (full design and measurements in [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)):
+
+1. **Token-level streaming synthesis architecture (zero model changes)**: pulls the cumulative acoustic-token stream from vLLM per request; every time `stream_chunk_tokens` new tokens arrive, the current full token prefix is re-run through the existing non-streaming decode path (gpt_layer → length regulator → CFM → BigVGAN), and only the newly stabilized portion of the resulting waveform is committed to the client. Prefix re-decoding is O(n²) — a deliberate trade of throughput (RTF ≈ 0.31 vs ≈ 0.17 non-streaming) for a 5x+ reduction in first-audio latency.
+
+2. **Click-free stream stitching (`StreamingPcmSmoother`)**: the trailing ~93 ms of each prefix waveform is held back as an "unstable zone"; once the next prefix (decoded with more right-hand context) arrives, the overlap is replaced via equal-power (cos/sin) cross-fading. Measured boundary discontinuity mean ≤ 0.014 full-scale with zero clipping; a fallback flush on stop token or unexpected stream end guarantees a complete tail.
+
+3. **Speaker conditioning cache**: an LRU cache keyed by `(absolute path, mtime)` of the reference audio avoids recomputing w2v-bert features, semantic-code quantization, campplus speaker embedding, and the length regulator (~250 ms) on every request. With a warm cache, TTFA drops another **16–18%** (732 → 605 ms). The cache lives at the engine layer and is shared across HTTP / WebSocket / non-streaming `/tts_url` / WebUI.
+
+4. **Dual-protocol streaming API and engineering polish**: `POST /tts_stream` (HTTP chunked) and `WS /ws/tts_stream` (JSON `start`/`end` events + binary PCM frames, with server-side metrics in `end`); mid-stream `cancel` is supported, and cancellation/disconnect calls `AsyncLLM.abort()` in `finally` to release inference resources; errors are returned as structured JSON without leaking tracebacks; comes with unit tests (`test/test_streaming.py` etc.) and an end-to-end benchmark client (`test/integration_streaming_v2.py`).
+
+Measured on a single 24 GB GPU (RTX 4090 class), ~130-character Chinese passage synthesizing ~24 s of audio:
+
+| Metric | Non-streaming `/tts_url` | Streaming (cold cache) | Streaming (warm cache) |
+| --- | --- | --- | --- |
+| Time to first audio (TTFA) | ≈ 4 s (waits for full WAV) | 0.7–0.9 s | **0.60–0.63 s** |
+| RTF | ≈ 0.17 | ≈ 0.31 | ≈ 0.30 |
+
+## What It Can Do
+
+- **Zero-shot voice cloning**: synthesize any text in the voice of a single reference audio clip; v1/v1.5 also supports blending multiple reference audios into one voice
+- **Low-latency streaming synthesis**: first audio in ~0.6 s, suited to voice assistants, conversational agents, and live narration where first-packet latency matters; supports mid-stream cancellation
+- **Emotion-controllable synthesis (IndexTTS2)**: three control modes — emotion reference audio, emotion vectors, or free-text emotion descriptions (via a Qwen emotion model)
+- **High-concurrency API serving**: vLLM continuous batching; ~16 concurrent requests measured at `gpu_memory_utilization=0.25` (~5 GB VRAM); OpenAI-compatible `/audio/speech` endpoint included
+- **Ready-to-use WebUI**: audition voices and tune parameters in the browser
+
+Upstream inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 - RTF (Real-Time Factor) for a single request: ≈0.3 -> ≈0.1
 - GPT model decode speed for a single request: ≈90 tokens/s -> ≈280 tokens/s
 - Concurrency: With `gpu_memory_utilization` set to 0.25 (approx. 5GB VRAM), it can handle a concurrency of around 16 without pressure (refer to `simple_test.py` for the benchmark script).
@@ -36,7 +64,7 @@ Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 
 ### 1. Clone this project
 ```bash
-git clone https://github.com/Ksuriuri/index-tts-vllm.git
+git clone https://github.com/yangohuang/index-tts-vllm.git
 cd index-tts-vllm
 ```
 

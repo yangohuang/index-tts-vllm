@@ -6,9 +6,37 @@
 </div>
 
 ## 项目简介
-该项目在 [index-tts](https://github.com/index-tts/index-tts) 的基础上使用 vllm 库重新实现了 gpt 模型的推理，加速了 index-tts 的推理过程。
 
-推理速度（Index-TTS-v1/v1.5）在单卡 RTX 4090 上的提升为：
+本项目基于 [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm) 二次开发。上游项目在 [index-tts](https://github.com/index-tts/index-tts) 的基础上使用 vLLM 重新实现了 gpt 模型的推理，大幅加速了 index-tts 的推理过程；本项目则在其之上，**为 IndexTTS2 补齐了生产可用的低延迟流式 TTS 能力**：不改动任何模型权重，将首包音频延迟（TTFA）从约 4 s 压到 **0.6–0.7 s**，并提供 HTTP / WebSocket 双协议流式接口。
+
+## 本项目的核心工作与优化
+
+上游已解决"gpt 推理快不快"的问题，本项目解决的是"**第一声出来得快不快、流式听感稳不稳**"的问题。核心工作如下（完整设计与测量见 [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)）：
+
+1. **Token 级流式合成架构（零模型改动）**：从 vLLM 按 request 拉取累积声学 token 流，每新增 `stream_chunk_tokens` 个 token 就将当前完整 token 前缀重新走一遍既有的非流式解码路径（gpt_layer → length regulator → CFM → BigVGAN），得到完整前缀波形后只向客户端提交新增的稳定部分。前缀重解码是 O(n²)，这是用吞吐（RTF ≈ 0.31 vs 非流式 ≈ 0.17）换取首包延迟 5 倍以上下降的明确取舍。
+
+2. **无爆音的流式拼接（`StreamingPcmSmoother`）**：每个前缀波形的尾部约 93 ms 作为"不稳定区"暂扣，等下一个带更多右侧上下文的前缀重解码后，用等功率（cos/sin）交叉淡化替换，实测边界跳变 mean ≤ 0.014 满幅、无削波；收到 stop token 或流意外结束时兜底 flush，保证结尾完整。
+
+3. **说话人条件缓存**：以 `(参考音频绝对路径, mtime)` 为 key 的 LRU 缓存，免去每次请求重复计算 w2v-bert 特征、语义码量化、campplus 声纹与 length regulator（约 250 ms）。热缓存下 TTFA 再降 **16–18%**（732 → 605 ms）；缓存位于引擎层，HTTP / WebSocket / 非流式 `/tts_url` / WebUI 全局共享互通。
+
+4. **双协议流式 API 与工程化**：`POST /tts_stream`（HTTP chunked）与 `WS /ws/tts_stream`（JSON `start`/`end` 事件 + 二进制 PCM 帧，`end` 携带服务端指标）；支持中途 `cancel`，取消/断连在 `finally` 中调用 `AsyncLLM.abort()` 释放推理资源；错误以结构化 JSON 返回、不暴露 traceback；配套单元测试（`test/test_streaming.py` 等）与端到端基准客户端（`test/integration_streaming_v2.py`）。
+
+单卡 24 GB（RTX 4090 级）实测（约 130 字中文，合成音频约 24 s）：
+
+| 指标 | 非流式 `/tts_url` | 流式（冷缓存） | 流式（热缓存） |
+| --- | --- | --- | --- |
+| 首包音频延迟 TTFA | ≈ 4 s（等完整 WAV） | 0.7–0.9 s | **0.60–0.63 s** |
+| RTF | ≈ 0.17 | ≈ 0.31 | ≈ 0.30 |
+
+## 能做什么
+
+- **零样本音色克隆**：给一段参考音频即可用该音色合成任意文本，v1/v1.5 还支持多参考音频混合声线
+- **低延迟流式语音合成**：约 0.6 s 出第一声，适合语音助手、对话式 Agent、实时播报等对首包延迟敏感的场景；支持中途取消
+- **情感可控合成（IndexTTS2）**：支持情感参考音频、情感向量与情感文本描述（经 Qwen 情感模型）三种控制方式
+- **高并发 API 服务**：vLLM 连续批处理，`gpu_memory_utilization=0.25`（约 5 GB 显存）下实测 16 并发无压力；提供 OpenAI 兼容的 `/audio/speech` 接口
+- **开箱即用的 WebUI**：网页端直接试听与调参
+
+上游对推理速度的提升（Index-TTS-v1/v1.5，单卡 RTX 4090）：
 - 单个请求的 RTF (Real-Time Factor)：≈0.3 -> ≈0.1
 - 单个请求的 gpt 模型 decode 速度：≈90 token / s -> ≈280 token / s
 - 并发量：gpu_memory_utilization 设置为 0.25（约5GB显存）的情况下，实测 16 左右的并发无压力（测速脚本参考 `simple_test.py`）
@@ -36,7 +64,7 @@
 
 ### 1. git 本项目
 ```bash
-git clone https://github.com/Ksuriuri/index-tts-vllm.git
+git clone https://github.com/yangohuang/index-tts-vllm.git
 cd index-tts-vllm
 ```
 
