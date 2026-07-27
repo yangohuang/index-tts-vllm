@@ -5,6 +5,13 @@
 # IndexTTS-vLLM
 </div>
 
+> **本 Fork 新增：IndexTTS2 token 级流式推理**（[Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm) 的分支）
+>
+> - `POST /tts_stream`（HTTP 分块）与 `WS /ws/tts_stream`（WebSocket，支持中途取消）两种流式接口，边生成边返回 PCM 音频
+> - 首音频延迟（TTFA）从非流式的 ~4 s 降至 **~0.6 s**（说话人条件缓存命中时，RTX 4090）
+> - 说话人条件 LRU 缓存（按路径 + mtime 自动失效）、请求级取消、服务端指标上报
+> - 用法见 [流式 TTS](#流式-tts仅-indextts2api_server_v2py)，实现与基准详见 [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
+
 ## 项目简介
 该项目在 [index-tts](https://github.com/index-tts/index-tts) 的基础上使用 vllm 库重新实现了 gpt 模型的推理，加速了 index-tts 的推理过程。
 

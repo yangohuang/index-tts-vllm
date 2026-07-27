@@ -5,6 +5,13 @@
 # IndexTTS-vLLM
 </div>
 
+> **This fork adds: token-level streaming inference for IndexTTS2** (fork of [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm))
+>
+> - Two streaming endpoints — `POST /tts_stream` (HTTP chunked) and `WS /ws/tts_stream` (WebSocket with mid-stream cancel) — returning PCM audio as it is generated
+> - Time-to-first-audio drops from ~4 s (non-streaming) to **~0.6 s** (with warm speaker-conditioning cache, RTX 4090)
+> - Speaker-conditioning LRU cache (keyed by path + mtime), per-request cancellation, server-side metrics
+> - Usage: [Streaming TTS](#streaming-tts-indextts2-only-api_server_v2py); implementation and benchmarks: [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
+
 ## Introduction
 This project re-implements the GPT model's inference from [index-tts](https://github.com/index-tts/index-tts) using the vllm library, accelerating the inference process of index-tts.
 
