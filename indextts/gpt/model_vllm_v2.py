@@ -2,6 +2,8 @@ import time
 import uuid
 import os
 import functools
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from loguru import logger
 import patch_vllm  # ⚠️ Monkey Patch, do not delete this line
@@ -20,6 +22,12 @@ from indextts.gpt.index_tts_gpt2_vllm_v1 import PLACEHOLDER_TOKEN, PLACEHOLDER_T
 
 from vllm import AsyncLLMEngine, SamplingParams, TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
+
+
+@dataclass(frozen=True)
+class AcousticTokenChunk:
+    token_ids: tuple[int, ...]
+    is_final: bool
 
 
 def null_position_embeddings(range, dim):
@@ -202,7 +210,7 @@ class UnifiedVoice(nn.Module):
         conds = self.emo_perceiver_encoder(speech_conditioning_input, conds_mask)  # (b, 1, d)
         return conds.squeeze(1)
 
-    async def inference_speech(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None, use_speed=False):
+    def prepare_speech_generation(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None):
         if speech_condition.ndim == 2:
             speech_condition = speech_condition.unsqueeze(0)
         if emo_speech_condition is None:
@@ -238,7 +246,12 @@ class UnifiedVoice(nn.Module):
         fake_inputs = PLACEHOLDER_TOKEN * 1  # [PLACEHOLDER_TOKEN_ID]
         multi_modal_data = {"audio": {"audio_embeds": [inputs_embeds.squeeze(0).cpu()]}}
         tokens_prompt = TokensPrompt(prompt=fake_inputs, multi_modal_data=multi_modal_data)
-        # tokens_prompt = TokensPrompt(prompt_token_ids=fake_inputs, multi_modal_data=multi_modal_data)
+        return tokens_prompt, speech_conditioning_latent
+
+    async def inference_speech(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None, use_speed=False):
+        tokens_prompt, speech_conditioning_latent = self.prepare_speech_generation(
+            speech_condition, text_inputs, emo_speech_condition, cond_lengths, emo_cond_lengths, emo_vec,
+        )
         request_id = uuid.uuid4().hex
         output_generator = self.llm.generate(tokens_prompt, sampling_params=self.sampling_params, request_id=request_id)
         gpt_stt = time.time()
@@ -253,6 +266,37 @@ class UnifiedVoice(nn.Module):
         codes = torch.tensor(codes, device=text_inputs.device, dtype=torch.long).unsqueeze(0)
 
         return codes, speech_conditioning_latent
+
+    async def inference_speech_stream(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None, request_id: str = ""):
+        tokens_prompt, speech_conditioning_latent = self.prepare_speech_generation(
+            speech_condition, text_inputs, emo_speech_condition, cond_lengths, emo_cond_lengths, emo_vec,
+        )
+        return (
+            self._stream_generated_codes(tokens_prompt, request_id),
+            speech_conditioning_latent,
+        )
+
+    async def _stream_generated_codes(
+        self, tokens_prompt: TokensPrompt, request_id: str
+    ) -> AsyncIterator[AcousticTokenChunk]:
+        output_generator = self.llm.generate(
+            tokens_prompt,
+            sampling_params=self.sampling_params,
+            request_id=request_id,
+        )
+        async for output in output_generator:
+            token_ids = tuple(output.outputs[0].token_ids)
+            is_final = (
+                len(token_ids) >= 2
+                and token_ids[-1] == self.stop_mel_token
+            )
+            usable = token_ids[:-2] if is_final else token_ids
+            yield AcousticTokenChunk(usable, is_final)
+            if is_final:
+                return
+
+    async def abort(self, request_id: str) -> None:
+        await self.llm.abort(request_id)
 
     def forward(self, speech_conditioning_latent, text_inputs, text_lengths, mel_codes, mel_codes_lengths, emo_speech_conditioning_latent,
                 cond_mel_lengths=None, emo_cond_mel_lengths=None, emo_vec=None, use_speed=None, do_spk_cond=False):
