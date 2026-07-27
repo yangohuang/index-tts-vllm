@@ -3,6 +3,7 @@ import random
 import re
 import time
 import traceback
+from dataclasses import dataclass
 from typing import List
 import uuid
 
@@ -25,6 +26,15 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 from indextts.BigVGAN.models import BigVGAN as Generator
 from indextts.audio_utils import save_pcm16_waveform
+from indextts.streaming import (
+    DEFAULT_STREAM_CHUNK_TOKENS,
+    SAMPLE_RATE as STREAM_SAMPLE_RATE,
+    PcmChunk,
+    StreamingPcmSmoother,
+    pcm16le_bytes,
+    should_decode_prefix,
+    validate_stream_chunk_tokens,
+)
 from indextts.gpt.model_vllm_v2 import UnifiedVoice
 from indextts.utils.checkpoint import load_checkpoint
 from indextts.utils.feature_extractors import MelSpectrogramFeatures
@@ -41,6 +51,18 @@ import torch.nn.functional as F
 from vllm import SamplingParams, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.v1.engine.async_llm import AsyncLLM
+
+
+@dataclass
+class PreparedInference:
+    spk_cond_emb: torch.Tensor
+    emo_cond_emb: torch.Tensor
+    emovec: torch.Tensor
+    prompt_condition: torch.Tensor
+    ref_mel: torch.Tensor
+    style: torch.Tensor
+    sentences: list
+    emotion_preprocess_seconds: float
 
 
 class IndexTTS2:
@@ -239,14 +261,12 @@ class IndexTTS2:
 
         return wavs_list
     
-    async def infer(self, spk_audio_prompt, text, output_path,
+    async def _prepare_inference(self, spk_audio_prompt, text,
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
-              use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_sentence=120, **generation_kwargs):
-        logger.info(">> start inference...")
-        start_time = time.perf_counter()
-
+              use_emo_text=False, emo_text=None, use_random=False,
+              verbose=False, max_text_tokens_per_sentence=120) -> PreparedInference:
+        emotion_preprocess_seconds = 0.0
         if use_emo_text:
             emo_audio_prompt = None
             emo_alpha = 1.0
@@ -254,7 +274,9 @@ class IndexTTS2:
             # assert emo_alpha == 1.0
             if emo_text is None:
                 emo_text = text
+            emo_stt = time.perf_counter()
             emo_dict, content = await self.qwen_emo.inference(emo_text)
+            emotion_preprocess_seconds = time.perf_counter() - emo_stt
             # logger.info(emo_dict)
             emo_vector = list(emo_dict.values())
 
@@ -325,6 +347,53 @@ class IndexTTS2:
             print("max_text_tokens_per_sentence:", max_text_tokens_per_sentence)
             print(*sentences, sep="\n")
 
+        with torch.no_grad():
+            emovec = self.gpt.merge_emovec(
+                spk_cond_emb,
+                emo_cond_emb,
+                torch.tensor([spk_cond_emb.shape[-1]], device=self.device),
+                torch.tensor([emo_cond_emb.shape[-1]], device=self.device),
+                alpha=emo_alpha
+            )
+
+            if emo_vector is not None:
+                emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
+                # emovec = emovec_mat
+
+        return PreparedInference(
+            spk_cond_emb=spk_cond_emb,
+            emo_cond_emb=emo_cond_emb,
+            emovec=emovec,
+            prompt_condition=prompt_condition,
+            ref_mel=ref_mel,
+            style=style,
+            sentences=sentences,
+            emotion_preprocess_seconds=emotion_preprocess_seconds,
+        )
+
+    async def infer(self, spk_audio_prompt, text, output_path,
+              emo_audio_prompt=None, emo_alpha=1.0,
+              emo_vector=None,
+              use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
+              verbose=False, max_text_tokens_per_sentence=120, **generation_kwargs):
+        logger.info(">> start inference...")
+        start_time = time.perf_counter()
+
+        prepared = await self._prepare_inference(
+            spk_audio_prompt, text,
+            emo_audio_prompt=emo_audio_prompt, emo_alpha=emo_alpha,
+            emo_vector=emo_vector,
+            use_emo_text=use_emo_text, emo_text=emo_text, use_random=use_random,
+            verbose=verbose, max_text_tokens_per_sentence=max_text_tokens_per_sentence,
+        )
+        spk_cond_emb = prepared.spk_cond_emb
+        emo_cond_emb = prepared.emo_cond_emb
+        emovec = prepared.emovec
+        prompt_condition = prepared.prompt_condition
+        ref_mel = prepared.ref_mel
+        style = prepared.style
+        sentences = prepared.sentences
+
         sampling_rate = 22050
 
         wavs = []
@@ -346,18 +415,6 @@ class IndexTTS2:
 
             m_start_time = time.perf_counter()
             with torch.no_grad():
-                emovec = self.gpt.merge_emovec(
-                    spk_cond_emb,
-                    emo_cond_emb,
-                    torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
-                    torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
-                    alpha=emo_alpha
-                )
-
-                if emo_vector is not None:
-                    emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
-                    # emovec = emovec_mat
-
                 codes, speech_conditioning_latent = await self.gpt.inference_speech(
                     spk_cond_emb,
                     text_tokens,
@@ -484,6 +541,134 @@ class IndexTTS2:
             wav_data = wav.type(torch.int16)
             wav_data = wav_data.numpy().T
             return (sampling_rate, wav_data)
+
+
+    async def stream_infer(self, spk_audio_prompt, text,
+              emo_audio_prompt=None, emo_alpha=1.0,
+              emo_vector=None,
+              use_emo_text=False, emo_text=None, use_random=False,
+              interval_silence=200,
+              max_text_tokens_per_sentence=120,
+              stream_chunk_tokens=DEFAULT_STREAM_CHUNK_TOKENS,
+              request_id=None):
+        """Yield PcmChunk objects of 22050 Hz mono PCM16 LE audio as tokens arrive."""
+        threshold = validate_stream_chunk_tokens(stream_chunk_tokens)
+        active_request_id = request_id or uuid.uuid4().hex
+        prepared = await self._prepare_inference(
+            spk_audio_prompt, text,
+            emo_audio_prompt=emo_audio_prompt, emo_alpha=emo_alpha,
+            emo_vector=emo_vector,
+            use_emo_text=use_emo_text, emo_text=emo_text, use_random=use_random,
+            max_text_tokens_per_sentence=max_text_tokens_per_sentence,
+        )
+        hop_length = int(self.cfg.s2mel.preprocess_params.spect_params.hop_length)
+        silence_samples = int(STREAM_SAMPLE_RATE * interval_silence / 1000.0)
+        try:
+            for sentence_index, sent in enumerate(prepared.sentences):
+                is_last_sentence = sentence_index == len(prepared.sentences) - 1
+                if sentence_index > 0 and silence_samples > 0:
+                    yield PcmChunk(pcm=b"\x00" * (2 * silence_samples), is_final=False)
+
+                text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
+                text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
+
+                token_stream, speech_conditioning_latent = await self.gpt.inference_speech_stream(
+                    prepared.spk_cond_emb,
+                    text_tokens,
+                    prepared.emo_cond_emb,
+                    cond_lengths=torch.tensor([prepared.spk_cond_emb.shape[-1]], device=text_tokens.device),
+                    emo_cond_lengths=torch.tensor([prepared.emo_cond_emb.shape[-1]], device=text_tokens.device),
+                    emo_vec=prepared.emovec,
+                    request_id=active_request_id,
+                )
+                smoother = StreamingPcmSmoother(hop_length=hop_length)
+                decoded_tokens = 0
+                latest_token_ids = ()
+                saw_final = False
+                async for token_chunk in token_stream:
+                    latest_token_ids = token_chunk.token_ids
+                    if not should_decode_prefix(
+                        len(token_chunk.token_ids),
+                        decoded_tokens,
+                        threshold,
+                        token_chunk.is_final,
+                    ):
+                        continue
+                    waveform = self._decode_stream_prefix(
+                        prepared,
+                        text_tokens,
+                        token_chunk.token_ids,
+                        speech_conditioning_latent,
+                    )
+                    stable = smoother.push(waveform, is_final=token_chunk.is_final)
+                    decoded_tokens = len(token_chunk.token_ids)
+                    saw_final = token_chunk.is_final
+                    pcm = pcm16le_bytes(stable)
+                    if pcm:
+                        yield PcmChunk(pcm=pcm, is_final=is_last_sentence and token_chunk.is_final)
+
+                if not saw_final and len(latest_token_ids) > decoded_tokens:
+                    # Generation ended without a stop token (max_tokens reached);
+                    # decode the remaining prefix so the tail is not lost.
+                    waveform = self._decode_stream_prefix(
+                        prepared,
+                        text_tokens,
+                        latest_token_ids,
+                        speech_conditioning_latent,
+                    )
+                    stable = smoother.push(waveform, is_final=True)
+                    saw_final = True
+                    pcm = pcm16le_bytes(stable)
+                    if pcm:
+                        yield PcmChunk(pcm=pcm, is_final=is_last_sentence)
+        finally:
+            await self.gpt.abort(active_request_id)
+
+    @torch.no_grad()
+    def _decode_stream_prefix(self, prepared: PreparedInference, text_tokens, token_ids, speech_conditioning_latent):
+        """Decode the full acoustic-token prefix to a PCM-scale float waveform.
+
+        Reuses the exact non-streaming GPT-forward, gpt_layer, semantic-code
+        embedding, length regulator, CFM, and BigVGAN path; stream state is
+        never mutated here.
+        """
+        codes = torch.tensor(token_ids, device=self.device, dtype=torch.long).unsqueeze(0)
+        code_lens = torch.tensor([codes.shape[-1]], device=self.device, dtype=torch.long)
+        use_speed = torch.zeros(prepared.spk_cond_emb.size(0)).to(self.device).long()
+        latent = self.gpt(
+            speech_conditioning_latent,
+            text_tokens,
+            torch.tensor([text_tokens.shape[-1]], device=self.device),
+            codes,
+            torch.tensor([codes.shape[-1]], device=self.device),
+            prepared.emo_cond_emb,
+            cond_mel_lengths=torch.tensor([prepared.spk_cond_emb.shape[-1]], device=self.device),
+            emo_cond_mel_lengths=torch.tensor([prepared.emo_cond_emb.shape[-1]], device=self.device),
+            emo_vec=prepared.emovec,
+            use_speed=use_speed,
+        )
+
+        diffusion_steps = 25
+        inference_cfg_rate = 0.7
+        latent = self.s2mel.models['gpt_layer'](latent)
+        S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
+        S_infer = S_infer.transpose(1, 2)
+        S_infer = S_infer + latent
+        target_lengths = (code_lens * 1.72).long()
+
+        cond = self.s2mel.models['length_regulator'](S_infer,
+                                                     ylens=target_lengths,
+                                                     n_quantizers=3,
+                                                     f0=None)[0]
+        cat_condition = torch.cat([prepared.prompt_condition, cond], dim=1)
+        vc_target = self.s2mel.models['cfm'].inference(cat_condition,
+                                                       torch.LongTensor([cat_condition.size(1)]).to(self.device),
+                                                       prepared.ref_mel, prepared.style, None, diffusion_steps,
+                                                       inference_cfg_rate=inference_cfg_rate)
+        vc_target = vc_target[:, :, prepared.ref_mel.size(-1):]
+        wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
+        wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
+        return wav.cpu().flatten()
 
 
 def find_most_similar_cosine(query_vector, matrix):
