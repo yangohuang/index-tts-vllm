@@ -63,6 +63,31 @@ length regulator → 25 步 CFM → BigVGAN），得到完整前缀波形；requ
 默认 `stream_chunk_tokens = 20`：TTFA 与 10 几乎相同（≈760 vs ≈730 ms），
 边界不连续度更稳定，重解码次数更少。对延迟极端敏感可用 10，注重吞吐可用 40+。
 
+## 迭代 2：说话人条件缓存（2026-07-27）
+
+**动机**：TTFA ~720–760 ms 中，每次请求都重复计算参考音频条件
+（w2v-bert 特征 → 语义码量化 → campplus 声纹 → length regulator）。
+
+**实现**：`IndexTTS2._get_speaker_conditioning` / `_get_emo_conditioning_emb` 以
+`(绝对路径, mtime)` 为 key 的 LRU 缓存（默认 20 条，文件被覆盖后 mtime 变化自动失效），
+缓存 `spk_cond_emb / prompt_condition / ref_mel / style` 与情感参考的 `emo_cond_emb`。
+非流式 `infer()` 与流式 `stream_infer()` 共享（都经 `_prepare_inference`）。
+
+**实测**（同上环境与文本，HTTP，预热服务器后测量）：
+
+| 场景 | chunk tokens | TTFA (ms) | 对比迭代 1 |
+| --- | --- | --- | --- |
+| 冷缓存（该说话人首次请求） | 10 | 858 | 与无缓存持平 |
+| **热缓存** | 10 | **605** | 732 → 605（-17%） |
+| **热缓存** | 20 | **632** | 759 → 632（-17%） |
+
+RTF 与音频时长不变（~0.30 / ~24 s）。
+
+**结论**：参考音频预处理实际耗时 ~250 ms（低于最初 300–450 ms 的估计），缓存后如数
+兑现；剩余 ~600 ms 由 vLLM prefill+首批 token（~200 ms）与首块 CFM+BigVGAN 解码
+（~400 ms）构成。若需进一步压低 TTFA，下一个杠杆是**首块降低 CFM 步数**（25 → 10–15，
+预估再省 100–200 ms）或裁短参考音频（prompt_condition 变短使每块 CFM 都变快）。
+
 ## 已知限制
 
 - 前缀重解码为 O(n²)，长句吞吐劣于非流式路径（RTF 0.31 vs 0.17）；超长文本请依赖
