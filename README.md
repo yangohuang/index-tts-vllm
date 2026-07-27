@@ -133,6 +133,70 @@ python api_server_v2.py
 - v1/1.5 请参考 `api_example.py`
 - v2 请参考 `api_example_v2.py`
 
+### 流式 TTS（仅 IndexTTS2，`api_server_v2.py`）
+
+`/tts_stream`（HTTP）与 `/ws/tts_stream`（WebSocket）以 token 为粒度流式返回音频：
+
+- 输出为**无文件头**的 22050 Hz 单声道 PCM16 小端（`pcm_s16le`）裸流。
+- `stream_chunk_tokens` 有效范围 **10–100**（默认 20）：值越小首包延迟（TTFA）越低，但总吞吐越差（前缀会被更频繁地重解码）。
+- 情感文本模式（`emo_control_method=3`）会先调用 Qwen 情感模型，增加流式开始前的预处理延迟。
+- 原有 `/tts_url` 接口保持不变，仍返回完整 WAV。
+
+HTTP 示例（curl，输出为裸 PCM，可用 ffplay 播放）：
+
+```bash
+curl -sN http://127.0.0.1:6006/tts_stream \
+  -H "Content-Type: application/json" \
+  -d '{"text": "你好，世界", "spk_audio_path": "assets/jay_promptvn.wav", "stream_chunk_tokens": 20}' \
+  | ffplay -f s16le -ar 22050 -ch_layout mono -i - -autoexit -nodisp
+```
+
+HTTP 示例（Python）：
+
+```python
+import httpx
+
+with httpx.stream("POST", "http://127.0.0.1:6006/tts_stream", json={
+    "text": "你好，世界",
+    "spk_audio_path": "assets/jay_promptvn.wav",
+    "stream_chunk_tokens": 20,
+}, timeout=180) as response:
+    response.raise_for_status()
+    for pcm_chunk in response.iter_bytes():
+        play_or_buffer(pcm_chunk)  # 22050 Hz 单声道 PCM16 LE
+```
+
+WebSocket 示例（Python，支持中途取消）：
+
+```python
+import asyncio, json
+import websockets
+
+async def synthesize():
+    async with websockets.connect("ws://127.0.0.1:6006/ws/tts_stream") as ws:
+        await ws.send(json.dumps({
+            "type": "synthesize",
+            "request_id": "demo-1",
+            "text": "你好，世界",
+            "spk_audio_path": "assets/jay_promptvn.wav",
+            "stream_chunk_tokens": 20,
+        }))
+        while True:
+            message = await ws.recv()
+            if isinstance(message, bytes):
+                play_or_buffer(message)  # 二进制帧：PCM16 LE 音频
+                continue
+            event = json.loads(message)  # JSON 帧：start / end / error
+            if event["type"] == "end":
+                print("metrics:", event["metrics"])
+                break
+        # 合成中途发送 {"type": "cancel"} 可取消，end 消息中 cancelled 为 true
+
+asyncio.run(synthesize())
+```
+
+基准测试客户端参考 [`test/integration_streaming_v2.py`](test/integration_streaming_v2.py)。
+
 ### OpenAI API
 - 添加 /audio/speech api 路径，兼容 OpenAI 接口
 - 添加 /audio/voices api 路径， 获得 voice/character 列表

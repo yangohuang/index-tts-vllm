@@ -133,6 +133,70 @@ python api_server_v2.py
 - For v1/1.5, please refer to `api_example.py`.
 - For v2, please refer to `api_example_v2.py`.
 
+### Streaming TTS (IndexTTS2 only, `api_server_v2.py`)
+
+`/tts_stream` (HTTP) and `/ws/tts_stream` (WebSocket) stream audio at token granularity:
+
+- Output is **headerless** 22050 Hz mono PCM16 little-endian (`pcm_s16le`) raw audio.
+- Valid `stream_chunk_tokens` range is **10–100** (default 20): smaller values lower time-to-first-audio but reduce overall throughput (the prefix is re-decoded more often).
+- Emotion-text mode (`emo_control_method=3`) first calls the Qwen emotion model, adding preprocessing latency before streaming starts.
+- The existing `/tts_url` endpoint is unchanged and still returns a complete WAV response.
+
+HTTP example (curl; raw PCM output playable with ffplay):
+
+```bash
+curl -sN http://127.0.0.1:6006/tts_stream \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "spk_audio_path": "assets/jay_promptvn.wav", "stream_chunk_tokens": 20}' \
+  | ffplay -f s16le -ar 22050 -ch_layout mono -i - -autoexit -nodisp
+```
+
+HTTP example (Python):
+
+```python
+import httpx
+
+with httpx.stream("POST", "http://127.0.0.1:6006/tts_stream", json={
+    "text": "Hello world",
+    "spk_audio_path": "assets/jay_promptvn.wav",
+    "stream_chunk_tokens": 20,
+}, timeout=180) as response:
+    response.raise_for_status()
+    for pcm_chunk in response.iter_bytes():
+        play_or_buffer(pcm_chunk)  # 22050 Hz mono PCM16 LE
+```
+
+WebSocket example (Python, supports mid-stream cancel):
+
+```python
+import asyncio, json
+import websockets
+
+async def synthesize():
+    async with websockets.connect("ws://127.0.0.1:6006/ws/tts_stream") as ws:
+        await ws.send(json.dumps({
+            "type": "synthesize",
+            "request_id": "demo-1",
+            "text": "Hello world",
+            "spk_audio_path": "assets/jay_promptvn.wav",
+            "stream_chunk_tokens": 20,
+        }))
+        while True:
+            message = await ws.recv()
+            if isinstance(message, bytes):
+                play_or_buffer(message)  # binary frames: PCM16 LE audio
+                continue
+            event = json.loads(message)  # JSON frames: start / end / error
+            if event["type"] == "end":
+                print("metrics:", event["metrics"])
+                break
+        # Send {"type": "cancel"} mid-synthesis to cancel; the end message then has cancelled=true
+
+asyncio.run(synthesize())
+```
+
+See [`test/integration_streaming_v2.py`](test/integration_streaming_v2.py) for a benchmark client.
+
 ### OpenAI API
 - Added `/audio/speech` API path for compatibility with the OpenAI interface.
 - Added `/audio/voices` API path to get the list of voices/characters.

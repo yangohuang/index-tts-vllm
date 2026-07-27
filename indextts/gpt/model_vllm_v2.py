@@ -210,6 +210,7 @@ class UnifiedVoice(nn.Module):
         conds = self.emo_perceiver_encoder(speech_conditioning_input, conds_mask)  # (b, 1, d)
         return conds.squeeze(1)
 
+    @torch.no_grad()
     def prepare_speech_generation(self, speech_condition, text_inputs, emo_speech_condition=None, cond_lengths=None, emo_cond_lengths=None, emo_vec=None):
         if speech_condition.ndim == 2:
             speech_condition = speech_condition.unsqueeze(0)
