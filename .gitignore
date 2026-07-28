@@ -19,3 +19,6 @@ output.wav
 logs/
 docs/superpowers/
 webui_v2_6007.log
+.claude/
+examples/audio1.wav
+examples/audio2.wav
