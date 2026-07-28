@@ -2,51 +2,104 @@
 
 <div align="center">
 
-# IndexTTS-vLLM
+# IndexTTS-vLLM · Streaming Edition
+
+**Token-level streaming inference for IndexTTS2: time-to-first-audio 4 s → 0.6 s**
+
+[![Streaming](https://img.shields.io/badge/TTFA-~600ms-brightgreen)](docs/indextts2-streaming-results.md)
+[![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#streaming-tts-indextts2-only-api_server_v2py)
+[![Tests](https://img.shields.io/badge/tests-34%20passed-success)](test/)
+
+Forked from [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm) (the vLLM-accelerated IndexTTS),
+this fork **designs and implements a complete streaming inference layer** on top of it.
+
 </div>
 
-> **This fork adds: token-level streaming inference for IndexTTS2** (fork of [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm))
->
-> - Two streaming endpoints — `POST /tts_stream` (HTTP chunked) and `WS /ws/tts_stream` (WebSocket with mid-stream cancel) — returning PCM audio as it is generated
-> - Time-to-first-audio drops from ~4 s (non-streaming) to **~0.6 s** (with warm speaker-conditioning cache, RTX 4090)
-> - Speaker-conditioning LRU cache (keyed by path + mtime), per-request cancellation, server-side metrics
-> - Usage: [Streaming TTS](#streaming-tts-indextts2-only-api_server_v2py); implementation and benchmarks: [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
+## ✨ Streaming Inference (this fork's core work)
 
-## Introduction
-This project re-implements the GPT model's inference from [index-tts](https://github.com/index-tts/index-tts) using the vllm library, accelerating the inference process of index-tts.
+Native IndexTTS2 inference must finish generating all tokens of a sentence before decoding any audio, so clients wait ~4 seconds before hearing the first word. This fork restructures the pipeline into **token-level streaming**: each time the GPT emits a batch of acoustic tokens, the current prefix is re-decoded and the newly stabilized audio is pushed to the client immediately.
+
+```mermaid
+flowchart LR
+    T[Text] --> G["GPT2 (vLLM)<br/>incremental token stream"]
+    G -->|"every N new tokens"| D["Prefix re-decode<br/>GPT forward → CFM ×25 → BigVGAN"]
+    D --> S["PCM Smoother<br/>stable-region commit + equal-power crossfade"]
+    S --> H["POST /tts_stream<br/>(HTTP chunked)"]
+    S --> W["WS /ws/tts_stream<br/>(mid-stream cancel)"]
+```
+
+### Measured results (RTX 4090, ~24 s Chinese audio, median of 3 runs)
+
+| Mode | Time-to-first-audio | RTF | Notes |
+| --- | --- | --- | --- |
+| Non-streaming `/tts_url` | ~4020 ms | 0.17 | must wait for full synthesis |
+| Streaming (cold cache) | ~830 ms | 0.31 | first request for a speaker |
+| **Streaming (warm cache)** | **~600 ms** | 0.31 | **6.7× faster first audio** |
+
+### Design highlights
+
+- **Prefix re-decode + stable-region commit**: CFM/BigVGAN re-decode the whole token prefix, but only audio before the trailing 93 ms "unstable region" is committed; that region is re-decoded next round with more right context and crossfaded (equal-power) against committed audio — no clicks, no repeats, no missing tails (measured boundary discontinuity mean ≤ 0.014 FS, zero clipping)
+- **Two transports, one engine stream**: HTTP chunked and WebSocket consume the same `stream_infer()` async generator; the WS protocol is JSON `start` → binary PCM frames → JSON `end` (with server-side TTFA/RTF metrics), and `{"type":"cancel"}` cancels mid-stream, cascading to vLLM `abort()`
+- **Speaker-conditioning cache**: the reference audio's w2v-bert / campplus / length-regulator conditioning is LRU-cached by `(path, mtime)`, shared across all entry points (HTTP/WS/non-streaming/WebUI), cutting another ~250 ms off TTFA
+- **Natural backpressure**: vLLM produces tokens faster than prefix decoding consumes them, so each decode round absorbs a larger increment — throughput does not collapse under streaming
+- **TDD throughout**: 34 CPU unit tests (fake vLLM / fake engine injection) + a reproducible GPU benchmark client
+
+📄 Full architecture, per-iteration measurements, and known limitations: [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
+
+## 🗺️ Roadmap
+
+**Streaming (this fork)**
+
+- [x] Token-level streaming inference (HTTP chunked + WebSocket)
+- [x] Per-request cancellation (WS cancel → vLLM abort) and server-side metrics
+- [x] Speaker-conditioning LRU cache (TTFA 732 ms → 605 ms)
+- [ ] Low-step CFM for the first chunk (25 → 10–15 steps): target TTFA < 500 ms
+- [ ] Incremental prefix decoding (reuse conditioning/KV, eliminate O(n²) re-decode for long texts)
+- [ ] Streaming container options: WAV header / Ogg-Opus, directly playable in browser `<audio>`
+- [ ] Reference-audio upload / URL endpoint (cross-machine calls without a shared filesystem)
+- [ ] OpenAI-compatible streaming endpoint (`/v1/audio/speech` with `stream=true`)
+- [ ] Concurrent streaming session scheduling and backpressure (streaming load tests)
+- [ ] API-key auth and rate limiting
+- [ ] Dockerfile / docker-compose one-command deployment
+
+**Inherited from upstream**
+
+- [ ] Concurrency optimization for the V2 API: only gpt2 inference is parallel; s2mel (25 DiT iterations) runs serially and limits concurrency
+- [ ] Acceleration of s2mel inference
+
+## Introduction (upstream capabilities)
+
+The upstream project re-implements the GPT model's inference from [index-tts](https://github.com/index-tts/index-tts) using the vllm library, accelerating the inference process of index-tts.
 
 Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 - RTF (Real-Time Factor) for a single request: ≈0.3 -> ≈0.1
 - GPT model decode speed for a single request: ≈90 tokens/s -> ≈280 tokens/s
 - Concurrency: With `gpu_memory_utilization` set to 0.25 (approx. 5GB VRAM), it can handle a concurrency of around 16 without pressure (refer to `simple_test.py` for the benchmark script).
 
-## Update Log
+<details>
+<summary><b>Upstream update log (click to expand)</b></summary>
 
 - **[2025-09-22]** Added support for vllm v1. Compatibility with IndexTTS2 is in progress.
-
 - **[2025-09-28]** Supported web UI inference for IndexTTS2 and organized the weight files for easier deployment! \0.0/ ; However, the current version doesn't seem to accelerate the GPT of IndexTTS2, which is under investigation.
-
 - **[2025-09-29]** Resolved the issue of ineffective GPT model inference acceleration for IndexTTS2.
-
 - **[2025-10-09]** Compatible with IndexTTS2 API calls, please refer to [API](#api); APIs for v1/1.5 and the OpenAI-compatible interfaces may still have bugs, to be fixed later.
-
 - **[2025-10-19]** Supported vllm inference for qwen0.6bemo4-merge.
-
 - **[2026-03-03]** vllm 0.16.0 support for gpt2 inference
 
-## TODO list
-- Concurrency optimization for V2 API: Currently, only the gpt2 model inference is parallel, while other modules run serially. The s2mel inference has a large overhead (requiring 25 DiT iterations), which significantly impacts concurrency performance.
+</details>
 
-- Acceleration of s2mel inference.
+**This fork's updates**
+
+- **[2026-07-27]** Token-level streaming inference for IndexTTS2: HTTP/WS transports, cancellation, metrics (TTFA ~730 ms)
+- **[2026-07-27]** Speaker-conditioning cache: warm-cache TTFA down to ~600 ms, shared across all entry points
 
 ## Usage Steps
 
 ### 1. Clone this project
 ```bash
-git clone https://github.com/Ksuriuri/index-tts-vllm.git
+git clone https://github.com/yangohuang/index-tts-vllm.git
 cd index-tts-vllm
 ```
-
 
 ### 2. Create and activate a conda environment
 ```bash
@@ -54,14 +107,12 @@ conda create -n index-tts-vllm python=3.12
 conda activate index-tts-vllm
 ```
 
-
 ### 3. Install dependencies
 Install dependencies with forced overrides to resolve the protobuf version conflict between vllm 0.16.0 and descript-audiotools 0.7.2.
 ```bash
 pip install uv
 uv pip install -r requirements.txt -c overrides.txt
 ```
-
 
 ### 4. Download model weights
 
@@ -102,9 +153,17 @@ You can use `convert_hf_format.sh` to convert the official weight files yourself
 bash convert_hf_format.sh /path/to/your/model_dir
 ```
 
-### 5. Launch the web UI!
+### 5. Launch!
 
-Run the corresponding version (the first launch may take longer due to CUDA kernel compilation for bigvgan):
+**API server (with streaming endpoints, recommended):**
+
+```bash
+python api_server_v2.py --model_dir checkpoints/IndexTTS-2-vLLM --is_fp16 \
+  --gpu_memory_utilization 0.25 --qwenemo_gpu_memory_utilization 0.10
+# Ready once GET /health returns 200 (~40 s)
+```
+
+**Web UI (the first launch may take longer due to CUDA kernel compilation for bigvgan):**
 
 ```bash
 # Index-TTS 1.0
@@ -117,7 +176,6 @@ python webui.py --version 1.5
 python webui_v2.py
 ```
 
-
 ## API
 
 An API interface is encapsulated using FastAPI. Here is an example of how to start it:
@@ -126,7 +184,7 @@ An API interface is encapsulated using FastAPI. Here is an example of how to sta
 # Index-TTS-1.0/1.5
 python api_server.py
 
-# IndexTTS-2
+# IndexTTS-2 (with streaming endpoints)
 python api_server_v2.py
 ```
 
@@ -225,5 +283,16 @@ Word Error Rate (WER) Results for IndexTTS and Baseline Models on the [**seed-te
 
 Maintains the performance of the original project.
 
-## Concurrency Test
-Refer to [`simple_test.py`](simple_test.py). The API service must be started first.
+## Testing
+
+```bash
+# CPU unit tests (streaming primitives / token stream / engine / API protocol / cache; no GPU needed)
+python -m pytest test -v
+
+# Streaming GPU benchmark (start the API server first)
+python test/integration_streaming_v2.py --transport websocket \
+  --text "...a sufficiently long paragraph..." --output-wav out.wav
+
+# Concurrency load test (non-streaming)
+python simple_test.py
+```
