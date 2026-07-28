@@ -4,9 +4,9 @@
 
 # IndexTTS-vLLM · 流式推理版
 
-**IndexTTS2 的 token 级流式推理：首音频延迟 4 s → 0.6 s**
+**IndexTTS2 的 token 级流式推理：首音频延迟 4 s → 0.47 s**
 
-[![Streaming](https://img.shields.io/badge/TTFA-~600ms-brightgreen)](docs/indextts2-streaming-results.md)
+[![Streaming](https://img.shields.io/badge/TTFA-~470ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#流式-tts仅-indextts2api_server_v2py)
 [![Tests](https://img.shields.io/badge/tests-47%20passed-success)](test/)
 
@@ -35,7 +35,8 @@ flowchart LR
 | --- | --- | --- | --- |
 | 非流式 `/tts_url` | ~4020 ms | 0.17 | 必须等整句合成完 |
 | 流式（冷缓存） | ~830 ms | 0.31 | 该说话人首次请求 |
-| **流式（热缓存）** | **~600 ms** | 0.31 | **首包快 6.7 倍** |
+| 流式（热缓存） | ~600 ms | 0.31 | 首包快 6.7 倍 |
+| **流式（热缓存 + 首块 15 步 CFM，默认）** | **~470 ms** | 0.27 | **首包快 8.6 倍**；首块 10 步可至 ~365 ms |
 
 ### 设计要点
 
@@ -54,7 +55,7 @@ flowchart LR
 - [x] Token 级流式推理（HTTP chunked + WebSocket）
 - [x] 请求级取消（WS cancel → vLLM abort）与服务端指标上报
 - [x] 说话人条件 LRU 缓存（TTFA 732 ms → 605 ms）
-- [x] 首块低步数 CFM（首个前缀解码 25 → 默认 15 步，API 可调 5–25）：目标 TTFA < 500 ms，GPU 实测待跑
+- [x] 首块低步数 CFM（首个前缀解码 25 → 默认 15 步，API 可调 5–25）：TTFA 660 → 467 ms，10 步可至 ~365 ms
 - [ ] 增量前缀解码（复用条件/KV，消除 O(n²) 重解码，根治长文吞吐）
 - [ ] 流式容器选项：WAV 头 / Ogg-Opus，浏览器 `<audio>` 直接可播
 - [ ] 参考音频上传 / URL 接口（跨机调用免共享文件系统）
@@ -93,7 +94,7 @@ flowchart LR
 
 - **[2026-07-27]** IndexTTS2 token 级流式推理上线：HTTP/WS 双传输、取消、指标（TTFA ~730 ms）
 - **[2026-07-27]** 说话人条件缓存：热缓存 TTFA 降至 ~600 ms，全入口共享
-- **[2026-07-28]** 首块低步数 CFM：request 首个前缀解码默认 15 步（可调 5–25），后续轮次全步数；GPU 基准待测
+- **[2026-07-28]** 首块低步数 CFM：request 首个前缀解码默认 15 步（可调 5–25），后续轮次全步数；热缓存 TTFA 降至 ~470 ms
 
 ## 使用步骤
 

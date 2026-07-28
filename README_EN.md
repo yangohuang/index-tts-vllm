@@ -4,9 +4,9 @@
 
 # IndexTTS-vLLM · Streaming Edition
 
-**Token-level streaming inference for IndexTTS2: time-to-first-audio 4 s → 0.6 s**
+**Token-level streaming inference for IndexTTS2: time-to-first-audio 4 s → 0.47 s**
 
-[![Streaming](https://img.shields.io/badge/TTFA-~600ms-brightgreen)](docs/indextts2-streaming-results.md)
+[![Streaming](https://img.shields.io/badge/TTFA-~470ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#streaming-tts-indextts2-only-api_server_v2py)
 [![Tests](https://img.shields.io/badge/tests-47%20passed-success)](test/)
 
@@ -34,7 +34,8 @@ flowchart LR
 | --- | --- | --- | --- |
 | Non-streaming `/tts_url` | ~4020 ms | 0.17 | must wait for full synthesis |
 | Streaming (cold cache) | ~830 ms | 0.31 | first request for a speaker |
-| **Streaming (warm cache)** | **~600 ms** | 0.31 | **6.7× faster first audio** |
+| Streaming (warm cache) | ~600 ms | 0.31 | 6.7× faster first audio |
+| **Streaming (warm cache + 15-step first chunk, default)** | **~470 ms** | 0.27 | **8.6× faster first audio**; ~365 ms at 10 steps |
 
 ### Design highlights
 
@@ -53,7 +54,7 @@ flowchart LR
 - [x] Token-level streaming inference (HTTP chunked + WebSocket)
 - [x] Per-request cancellation (WS cancel → vLLM abort) and server-side metrics
 - [x] Speaker-conditioning LRU cache (TTFA 732 ms → 605 ms)
-- [x] Low-step CFM for the first chunk (first prefix decode 25 → default 15 steps, API-tunable 5–25): target TTFA < 500 ms, GPU benchmark pending
+- [x] Low-step CFM for the first chunk (first prefix decode 25 → default 15 steps, API-tunable 5–25): TTFA 660 → 467 ms, ~365 ms at 10 steps
 - [ ] Incremental prefix decoding (reuse conditioning/KV, eliminate O(n²) re-decode for long texts)
 - [ ] Streaming container options: WAV header / Ogg-Opus, directly playable in browser `<audio>`
 - [ ] Reference-audio upload / URL endpoint (cross-machine calls without a shared filesystem)
@@ -92,7 +93,7 @@ Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 
 - **[2026-07-27]** Token-level streaming inference for IndexTTS2: HTTP/WS transports, cancellation, metrics (TTFA ~730 ms)
 - **[2026-07-27]** Speaker-conditioning cache: warm-cache TTFA down to ~600 ms, shared across all entry points
-- **[2026-07-28]** Low-step CFM for the first chunk: the request's first prefix decode defaults to 15 steps (tunable 5–25), later rounds use full steps; GPU benchmark pending
+- **[2026-07-28]** Low-step CFM for the first chunk: the request's first prefix decode defaults to 15 steps (tunable 5–25), later rounds use full steps; warm-cache TTFA down to ~470 ms
 
 ## Usage Steps
 
