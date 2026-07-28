@@ -96,6 +96,7 @@ async def main() -> None:
     parser.add_argument("--spk-audio", default="assets/jay_promptvn.wav")
     parser.add_argument("--text", required=True)
     parser.add_argument("--stream-chunk-tokens", type=int, default=20)
+    parser.add_argument("--first-chunk-diffusion-steps", type=int, default=None)
     parser.add_argument("--transport", choices=["http", "websocket"], default="http")
     parser.add_argument("--output-wav", default=None)
     args = parser.parse_args()
@@ -105,6 +106,8 @@ async def main() -> None:
         "spk_audio_path": args.spk_audio,
         "stream_chunk_tokens": args.stream_chunk_tokens,
     }
+    if args.first_chunk_diffusion_steps is not None:
+        payload["first_chunk_diffusion_steps"] = args.first_chunk_diffusion_steps
     if args.transport == "http":
         _, pcm = await benchmark_http(args.base_url, payload)
     else:

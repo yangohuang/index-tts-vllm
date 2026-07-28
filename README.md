@@ -8,7 +8,7 @@
 
 [![Streaming](https://img.shields.io/badge/TTFA-~600ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#流式-tts仅-indextts2api_server_v2py)
-[![Tests](https://img.shields.io/badge/tests-34%20passed-success)](test/)
+[![Tests](https://img.shields.io/badge/tests-47%20passed-success)](test/)
 
 本仓库 fork 自 [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm)（vLLM 加速版 IndexTTS），
 在其之上**设计并实现了完整的流式推理层**。
@@ -43,7 +43,7 @@ flowchart LR
 - **双传输共享一套引擎流**：HTTP chunked 与 WebSocket 消费同一个 `stream_infer()` 异步生成器；WS 协议为 JSON `start` → 二进制 PCM 帧 → JSON `end`（含 TTFA/RTF 等服务端指标），支持 `{"type":"cancel"}` 中途取消并级联到 vLLM `abort()`
 - **说话人条件缓存**：参考音频的 w2v-bert / campplus / length-regulator 条件按 `(路径, mtime)` LRU 缓存，全入口（HTTP/WS/非流式/WebUI）共享互通，TTFA 再降 ~250 ms
 - **自然背压**：vLLM 产 token 快于前缀解码，每轮解码自动吸收更多增量，吞吐不因流式塌陷
-- **TDD 全覆盖**：34 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
+- **TDD 全覆盖**：47 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
 
 📄 完整架构、逐轮迭代数据与已知限制：[docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
 
@@ -54,7 +54,7 @@ flowchart LR
 - [x] Token 级流式推理（HTTP chunked + WebSocket）
 - [x] 请求级取消（WS cancel → vLLM abort）与服务端指标上报
 - [x] 说话人条件 LRU 缓存（TTFA 732 ms → 605 ms）
-- [ ] 首块低步数 CFM（25 → 10–15 步）：目标 TTFA < 500 ms
+- [x] 首块低步数 CFM（首个前缀解码 25 → 默认 15 步，API 可调 5–25）：目标 TTFA < 500 ms，GPU 实测待跑
 - [ ] 增量前缀解码（复用条件/KV，消除 O(n²) 重解码，根治长文吞吐）
 - [ ] 流式容器选项：WAV 头 / Ogg-Opus，浏览器 `<audio>` 直接可播
 - [ ] 参考音频上传 / URL 接口（跨机调用免共享文件系统）
@@ -93,6 +93,7 @@ flowchart LR
 
 - **[2026-07-27]** IndexTTS2 token 级流式推理上线：HTTP/WS 双传输、取消、指标（TTFA ~730 ms）
 - **[2026-07-27]** 说话人条件缓存：热缓存 TTFA 降至 ~600 ms，全入口共享
+- **[2026-07-28]** 首块低步数 CFM：request 首个前缀解码默认 15 步（可调 5–25），后续轮次全步数；GPU 基准待测
 
 ## 使用步骤
 
@@ -205,6 +206,7 @@ python api_server_v2.py
 
 - 输出为**无文件头**的 22050 Hz 单声道 PCM16 小端（`pcm_s16le`）裸流。
 - `stream_chunk_tokens` 有效范围 **10–100**（默认 20）：值越小首包延迟（TTFA）越低，但总吞吐越差（前缀会被更频繁地重解码）。
+- `first_chunk_diffusion_steps` 有效范围 **5–25**（默认 15）：仅 request 的首个前缀解码使用的 CFM 步数，后续轮次固定 25 步。步数越低首包越快、开头约 0.4 s 音质略降；设为 25 即关闭该优化。
 - 情感文本模式（`emo_control_method=3`）会先调用 Qwen 情感模型，增加流式开始前的预处理延迟。
 - 原有 `/tts_url` 接口保持不变，仍返回完整 WAV。
 

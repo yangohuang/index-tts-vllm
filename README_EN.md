@@ -8,7 +8,7 @@
 
 [![Streaming](https://img.shields.io/badge/TTFA-~600ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#streaming-tts-indextts2-only-api_server_v2py)
-[![Tests](https://img.shields.io/badge/tests-34%20passed-success)](test/)
+[![Tests](https://img.shields.io/badge/tests-47%20passed-success)](test/)
 
 Forked from [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm) (the vLLM-accelerated IndexTTS),
 this fork **designs and implements a complete streaming inference layer** on top of it.
@@ -42,7 +42,7 @@ flowchart LR
 - **Two transports, one engine stream**: HTTP chunked and WebSocket consume the same `stream_infer()` async generator; the WS protocol is JSON `start` → binary PCM frames → JSON `end` (with server-side TTFA/RTF metrics), and `{"type":"cancel"}` cancels mid-stream, cascading to vLLM `abort()`
 - **Speaker-conditioning cache**: the reference audio's w2v-bert / campplus / length-regulator conditioning is LRU-cached by `(path, mtime)`, shared across all entry points (HTTP/WS/non-streaming/WebUI), cutting another ~250 ms off TTFA
 - **Natural backpressure**: vLLM produces tokens faster than prefix decoding consumes them, so each decode round absorbs a larger increment — throughput does not collapse under streaming
-- **TDD throughout**: 34 CPU unit tests (fake vLLM / fake engine injection) + a reproducible GPU benchmark client
+- **TDD throughout**: 47 CPU unit tests (fake vLLM / fake engine injection) + a reproducible GPU benchmark client
 
 📄 Full architecture, per-iteration measurements, and known limitations: [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
 
@@ -53,7 +53,7 @@ flowchart LR
 - [x] Token-level streaming inference (HTTP chunked + WebSocket)
 - [x] Per-request cancellation (WS cancel → vLLM abort) and server-side metrics
 - [x] Speaker-conditioning LRU cache (TTFA 732 ms → 605 ms)
-- [ ] Low-step CFM for the first chunk (25 → 10–15 steps): target TTFA < 500 ms
+- [x] Low-step CFM for the first chunk (first prefix decode 25 → default 15 steps, API-tunable 5–25): target TTFA < 500 ms, GPU benchmark pending
 - [ ] Incremental prefix decoding (reuse conditioning/KV, eliminate O(n²) re-decode for long texts)
 - [ ] Streaming container options: WAV header / Ogg-Opus, directly playable in browser `<audio>`
 - [ ] Reference-audio upload / URL endpoint (cross-machine calls without a shared filesystem)
@@ -92,6 +92,7 @@ Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 
 - **[2026-07-27]** Token-level streaming inference for IndexTTS2: HTTP/WS transports, cancellation, metrics (TTFA ~730 ms)
 - **[2026-07-27]** Speaker-conditioning cache: warm-cache TTFA down to ~600 ms, shared across all entry points
+- **[2026-07-28]** Low-step CFM for the first chunk: the request's first prefix decode defaults to 15 steps (tunable 5–25), later rounds use full steps; GPU benchmark pending
 
 ## Usage Steps
 
@@ -204,6 +205,7 @@ python api_server_v2.py
 
 - Output is **headerless** 22050 Hz mono PCM16 little-endian (`pcm_s16le`) raw audio.
 - Valid `stream_chunk_tokens` range is **10–100** (default 20): smaller values lower time-to-first-audio but reduce overall throughput (the prefix is re-decoded more often).
+- Valid `first_chunk_diffusion_steps` range is **5–25** (default 15): CFM steps used only for the request's first prefix decode; later rounds always use 25. Lower values cut TTFA at a slight quality cost in the opening ~0.4 s; 25 disables the optimization.
 - Emotion-text mode (`emo_control_method=3`) first calls the Qwen emotion model, adding preprocessing latency before streaming starts.
 - The existing `/tts_url` endpoint is unchanged and still returns a complete WAV response.
 

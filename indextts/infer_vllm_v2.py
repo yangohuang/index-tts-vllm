@@ -28,12 +28,15 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from indextts.BigVGAN.models import BigVGAN as Generator
 from indextts.audio_utils import save_pcm16_waveform
 from indextts.streaming import (
+    DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
     DEFAULT_STREAM_CHUNK_TOKENS,
+    FULL_DIFFUSION_STEPS,
     SAMPLE_RATE as STREAM_SAMPLE_RATE,
     PcmChunk,
     StreamingPcmSmoother,
     pcm16le_bytes,
     should_decode_prefix,
+    validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
 )
 from indextts.gpt.model_vllm_v2 import UnifiedVoice
@@ -603,9 +606,11 @@ class IndexTTS2:
               interval_silence=200,
               max_text_tokens_per_sentence=120,
               stream_chunk_tokens=DEFAULT_STREAM_CHUNK_TOKENS,
+              first_chunk_diffusion_steps=DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
               request_id=None):
         """Yield PcmChunk objects of 22050 Hz mono PCM16 LE audio as tokens arrive."""
         threshold = validate_stream_chunk_tokens(stream_chunk_tokens)
+        first_steps = validate_first_chunk_diffusion_steps(first_chunk_diffusion_steps)
         active_request_id = request_id or uuid.uuid4().hex
         prepared = await self._prepare_inference(
             spk_audio_prompt, text,
@@ -616,6 +621,11 @@ class IndexTTS2:
         )
         hop_length = int(self.cfg.s2mel.preprocess_params.spect_params.hop_length)
         silence_samples = int(STREAM_SAMPLE_RATE * interval_silence / 1000.0)
+        # Only the request's very first decode runs with reduced CFM steps: it
+        # alone determines TTFA, and its held-back tail is re-decoded at full
+        # steps next round, so the quality trade-off is limited to the opening
+        # committed region (~0.4 s at default chunk size).
+        request_decoded = False
         try:
             for sentence_index, sent in enumerate(prepared.sentences):
                 is_last_sentence = sentence_index == len(prepared.sentences) - 1
@@ -652,7 +662,9 @@ class IndexTTS2:
                         text_tokens,
                         token_chunk.token_ids,
                         speech_conditioning_latent,
+                        diffusion_steps=first_steps if not request_decoded else FULL_DIFFUSION_STEPS,
                     )
+                    request_decoded = True
                     stable = smoother.push(waveform, is_final=token_chunk.is_final)
                     decoded_tokens = len(token_chunk.token_ids)
                     saw_final = token_chunk.is_final
@@ -668,7 +680,9 @@ class IndexTTS2:
                         text_tokens,
                         latest_token_ids,
                         speech_conditioning_latent,
+                        diffusion_steps=first_steps if not request_decoded else FULL_DIFFUSION_STEPS,
                     )
+                    request_decoded = True
                     stable = smoother.push(waveform, is_final=True)
                     saw_final = True
                     pcm = pcm16le_bytes(stable)
@@ -678,7 +692,8 @@ class IndexTTS2:
             await self.gpt.abort(active_request_id)
 
     @torch.no_grad()
-    def _decode_stream_prefix(self, prepared: PreparedInference, text_tokens, token_ids, speech_conditioning_latent):
+    def _decode_stream_prefix(self, prepared: PreparedInference, text_tokens, token_ids, speech_conditioning_latent,
+                              diffusion_steps=FULL_DIFFUSION_STEPS):
         """Decode the full acoustic-token prefix to a PCM-scale float waveform.
 
         Reuses the exact non-streaming GPT-forward, gpt_layer, semantic-code
@@ -701,7 +716,6 @@ class IndexTTS2:
             use_speed=use_speed,
         )
 
-        diffusion_steps = 25
         inference_cfg_rate = 0.7
         latent = self.s2mel.models['gpt_layer'](latent)
         S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))

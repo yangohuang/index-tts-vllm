@@ -14,6 +14,9 @@ PCM16_SAMPLE_WIDTH = 2
 DEFAULT_STREAM_CHUNK_TOKENS = 20
 MIN_STREAM_CHUNK_TOKENS = 10
 MAX_STREAM_CHUNK_TOKENS = 100
+FULL_DIFFUSION_STEPS = 25
+DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS = 15
+MIN_FIRST_CHUNK_DIFFUSION_STEPS = 5
 
 
 def validate_stream_chunk_tokens(value: int) -> int:
@@ -23,6 +26,17 @@ def validate_stream_chunk_tokens(value: int) -> int:
         raise ValueError(
             f"stream_chunk_tokens must be between "
             f"{MIN_STREAM_CHUNK_TOKENS} and {MAX_STREAM_CHUNK_TOKENS}"
+        )
+    return value
+
+
+def validate_first_chunk_diffusion_steps(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("first_chunk_diffusion_steps must be an integer")
+    if not MIN_FIRST_CHUNK_DIFFUSION_STEPS <= value <= FULL_DIFFUSION_STEPS:
+        raise ValueError(
+            f"first_chunk_diffusion_steps must be between "
+            f"{MIN_FIRST_CHUNK_DIFFUSION_STEPS} and {FULL_DIFFUSION_STEPS}"
         )
     return value
 

@@ -21,10 +21,12 @@ logger.add("logs/api_server_v2.log", rotation="10 MB", retention=10, level="DEBU
 from indextts.infer_vllm_v2 import IndexTTS2
 from indextts.streaming import (
     CHANNELS,
+    DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
     DEFAULT_STREAM_CHUNK_TOKENS,
     SAMPLE_FORMAT,
     SAMPLE_RATE,
     StreamMetrics,
+    validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
 )
 
@@ -54,6 +56,7 @@ class TtsStreamRequest(BaseModel):
     emo_random: bool = False
     max_text_tokens_per_sentence: int = 120
     stream_chunk_tokens: int = DEFAULT_STREAM_CHUNK_TOKENS
+    first_chunk_diffusion_steps: int = DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS
     request_id: str | None = None
 
     @field_validator("text")
@@ -67,6 +70,11 @@ class TtsStreamRequest(BaseModel):
     @classmethod
     def validate_chunk_tokens(cls, value):
         return validate_stream_chunk_tokens(value)
+
+    @field_validator("first_chunk_diffusion_steps")
+    @classmethod
+    def validate_first_chunk_steps(cls, value):
+        return validate_first_chunk_diffusion_steps(value)
 
 
 def stream_infer_kwargs(payload: TtsStreamRequest) -> dict:
@@ -94,6 +102,7 @@ def stream_infer_kwargs(payload: TtsStreamRequest) -> dict:
         use_random=payload.emo_random,
         max_text_tokens_per_sentence=payload.max_text_tokens_per_sentence,
         stream_chunk_tokens=payload.stream_chunk_tokens,
+        first_chunk_diffusion_steps=payload.first_chunk_diffusion_steps,
         request_id=payload.request_id,
     )
 
@@ -217,6 +226,7 @@ async def tts_stream_api(payload: TtsStreamRequest):
             "X-Audio-Channels": str(CHANNELS),
             "X-Audio-Sample-Format": SAMPLE_FORMAT,
             "X-Stream-Chunk-Tokens": str(payload.stream_chunk_tokens),
+            "X-First-Chunk-Diffusion-Steps": str(payload.first_chunk_diffusion_steps),
         },
     )
 

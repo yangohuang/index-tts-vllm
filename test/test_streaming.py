@@ -3,13 +3,16 @@ import pytest
 import torch
 
 from indextts.streaming import (
+    DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
     DEFAULT_STREAM_CHUNK_TOKENS,
+    FULL_DIFFUSION_STEPS,
     MAX_STREAM_CHUNK_TOKENS,
     MIN_STREAM_CHUNK_TOKENS,
     PCM16_SAMPLE_WIDTH,
     StreamMetrics,
     StreamingPcmSmoother,
     pcm16le_bytes,
+    validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
 )
 
@@ -23,6 +26,17 @@ def test_validate_stream_chunk_tokens_accepts_supported_values(value):
 def test_validate_stream_chunk_tokens_rejects_unsupported_values(value):
     with pytest.raises(ValueError):
         validate_stream_chunk_tokens(value)
+
+
+@pytest.mark.parametrize("value", [5, DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS, FULL_DIFFUSION_STEPS])
+def test_validate_first_chunk_diffusion_steps_accepts_supported_values(value):
+    assert validate_first_chunk_diffusion_steps(value) == value
+
+
+@pytest.mark.parametrize("value", [4, 26, 15.0, "15", True])
+def test_validate_first_chunk_diffusion_steps_rejects_unsupported_values(value):
+    with pytest.raises(ValueError):
+        validate_first_chunk_diffusion_steps(value)
 
 
 def test_pcm16le_bytes_clips_and_encodes_little_endian():

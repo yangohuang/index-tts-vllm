@@ -28,6 +28,24 @@ def test_stream_request_rejects_out_of_range_chunk_tokens():
         )
 
 
+def test_stream_request_defaults_first_chunk_diffusion_steps():
+    request = TtsStreamRequest(text="hello", spk_audio_path="speaker.wav")
+    assert request.first_chunk_diffusion_steps == 15
+    kwargs = api_server_v2.stream_infer_kwargs(request)
+    assert kwargs["first_chunk_diffusion_steps"] == 15
+
+
+def test_stream_request_rejects_out_of_range_first_chunk_diffusion_steps():
+    with pytest.raises(ValueError):
+        TtsStreamRequest(
+            text="hello", spk_audio_path="speaker.wav", first_chunk_diffusion_steps=4
+        )
+    with pytest.raises(ValueError):
+        TtsStreamRequest(
+            text="hello", spk_audio_path="speaker.wav", first_chunk_diffusion_steps=26
+        )
+
+
 def test_stream_request_rejects_overweight_emotion_vector():
     request = TtsStreamRequest(
         text="hello",
@@ -75,6 +93,7 @@ def test_http_stream_returns_pcm_headers_and_body(client):
     assert response.headers["x-audio-sample-rate"] == "22050"
     assert response.headers["x-audio-channels"] == "1"
     assert response.headers["x-audio-sample-format"] == "pcm_s16le"
+    assert response.headers["x-first-chunk-diffusion-steps"] == "15"
     assert response.content == b"\x01\x00\x02\x00"
 
 
