@@ -28,14 +28,25 @@ flowchart LR
     S --> W["WS /ws/tts_stream<br/>(mid-stream cancel)"]
 ```
 
-### Measured results (RTX 4090, ~24 s Chinese audio, median of 3 runs)
+### Measured results
 
-| Mode | Time-to-first-audio | RTF | Notes |
+**Terminology first**:
+
+- **TTFA** (Time To First Audio): elapsed time from sending the request to receiving the first playable audio. The key UX metric for dialog / digital-human use — it is the silence before a reply starts.
+- **RTF** (Real-Time Factor): synthesis time ÷ audio duration. RTF 0.25 means 10 s of audio takes 2.5 s to synthesize; anything below 1 can play while synthesizing, and lower RTF means more concurrent streams per GPU.
+- **Cold / warm cache**: every request first extracts speaker features from the reference audio (~250 ms). This fork caches those features per file — the **first** request with a given reference pays the cost (cold), every later request with the same reference hits the cache (warm). Production voices are usually fixed, so warm is the steady state.
+
+Setup: single RTX 4090, ~130-character Chinese text (~24 s of audio), median of 3 runs after one discarded warmup. Rows below stack the optimizations in order; **the last row is the current default**:
+
+| Mode | TTFA | RTF | Notes |
 | --- | --- | --- | --- |
-| Non-streaming `/tts_url` | ~4020 ms | 0.17 | must wait for full synthesis |
-| Streaming (cold cache) | ~830 ms | 0.31 | first request for a speaker |
-| Streaming (warm cache) | ~600 ms | 0.31 | 6.7× faster first audio |
-| **Streaming (warm cache + 10-step first chunk + incremental decode, default)** | **~365 ms** | 0.25 | **11× faster first audio** |
+| Non-streaming `/tts_url` (original) | ~4020 ms | 0.17 | returns only after full synthesis — a 4 s wait |
+| Streaming, cold cache | ~830 ms | 0.31 | synthesize-while-sending; includes ~250 ms feature extraction |
+| Streaming, warm cache | ~600 ms | 0.31 | speaker features served from cache |
+| Streaming, warm cache + 10-step first chunk | ~467→365 ms | 0.31 | only the **first** chunk uses 10 diffusion steps instead of 25 (no audible difference); later chunks unaffected |
+| **Streaming + incremental decoding (current default)** | **~365 ms** | **0.25** | already-synthesized audio is never re-decoded; ~10% faster synthesis, quality verified lossless by same-token comparison and listening |
+
+In one sentence: **first audio drops from 4 s to 0.37 s (11× faster), and synthesis runs 4× faster than real time throughout.** Streaming RTF (0.25) being higher than non-streaming (0.17) is the inherent cost of streaming decode, traded for first audio arriving 3.6 s earlier.
 
 ### Design highlights
 
