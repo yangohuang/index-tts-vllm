@@ -363,6 +363,44 @@ def test_decode_stream_prefix_without_state_regenerates_everything():
 
 
 @pytest.mark.asyncio
+async def test_stream_infer_applies_diffusion_steps_to_all_later_rounds():
+    batch = [
+        AcousticTokenChunk(tuple(range(20)), False),
+        AcousticTokenChunk(tuple(range(30)), True),
+    ]
+    engine = make_engine(
+        chunk_batches=[list(batch), list(batch)],
+        sentences=[["a"], ["b"]],
+    )
+
+    async for _ in engine.stream_infer(
+        spk_audio_prompt="speaker.wav",
+        text="two sentences",
+        stream_chunk_tokens=20,
+        first_chunk_diffusion_steps=5,
+        diffusion_steps=5,
+    ):
+        pass
+    assert engine.decode_steps_log == [5, 5, 5, 5]
+
+
+@pytest.mark.asyncio
+async def test_stream_infer_rejects_invalid_diffusion_steps():
+    engine = make_engine(
+        chunk_batches=[[AcousticTokenChunk(tuple(range(20)), True)]],
+        sentences=[["a"]],
+    )
+
+    with pytest.raises(ValueError):
+        async for _ in engine.stream_infer(
+            spk_audio_prompt="speaker.wav",
+            text="bad steps",
+            diffusion_steps=26,
+        ):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_stream_infer_uses_one_mel_cache_per_sentence():
     batch = [
         AcousticTokenChunk(tuple(range(20)), False),

@@ -35,6 +35,20 @@ def test_stream_request_defaults_first_chunk_diffusion_steps():
     assert kwargs["first_chunk_diffusion_steps"] == 10
 
 
+def test_stream_request_maps_diffusion_steps():
+    request = TtsStreamRequest(text="hello", spk_audio_path="speaker.wav")
+    assert request.diffusion_steps == 25
+    assert api_server_v2.stream_infer_kwargs(request)["diffusion_steps"] == 25
+    low = TtsStreamRequest(
+        text="hello", spk_audio_path="speaker.wav", diffusion_steps=5
+    )
+    assert api_server_v2.stream_infer_kwargs(low)["diffusion_steps"] == 5
+    with pytest.raises(ValueError):
+        TtsStreamRequest(
+            text="hello", spk_audio_path="speaker.wav", diffusion_steps=4
+        )
+
+
 def test_stream_request_maps_incremental_decode_flag():
     request = TtsStreamRequest(text="hello", spk_audio_path="speaker.wav")
     assert request.incremental_decode is True

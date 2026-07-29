@@ -39,6 +39,7 @@ from indextts.streaming import (
     pcm16le_bytes,
     plan_mel_window,
     should_decode_prefix,
+    validate_diffusion_steps,
     validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
 )
@@ -610,11 +611,13 @@ class IndexTTS2:
               max_text_tokens_per_sentence=120,
               stream_chunk_tokens=DEFAULT_STREAM_CHUNK_TOKENS,
               first_chunk_diffusion_steps=DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
+              diffusion_steps=FULL_DIFFUSION_STEPS,
               incremental_decode=True,
               request_id=None):
         """Yield PcmChunk objects of 22050 Hz mono PCM16 LE audio as tokens arrive."""
         threshold = validate_stream_chunk_tokens(stream_chunk_tokens)
         first_steps = validate_first_chunk_diffusion_steps(first_chunk_diffusion_steps)
+        full_steps = validate_diffusion_steps(diffusion_steps)
         active_request_id = request_id or uuid.uuid4().hex
         prepared = await self._prepare_inference(
             spk_audio_prompt, text,
@@ -667,7 +670,7 @@ class IndexTTS2:
                         text_tokens,
                         token_chunk.token_ids,
                         speech_conditioning_latent,
-                        diffusion_steps=first_steps if not request_decoded else FULL_DIFFUSION_STEPS,
+                        diffusion_steps=first_steps if not request_decoded else full_steps,
                         mel_state=mel_state,
                     )
                     request_decoded = True
@@ -686,7 +689,7 @@ class IndexTTS2:
                         text_tokens,
                         latest_token_ids,
                         speech_conditioning_latent,
-                        diffusion_steps=first_steps if not request_decoded else FULL_DIFFUSION_STEPS,
+                        diffusion_steps=first_steps if not request_decoded else full_steps,
                         mel_state=mel_state,
                     )
                     request_decoded = True

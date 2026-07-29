@@ -23,11 +23,13 @@ from indextts.streaming import (
     CHANNELS,
     DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
     DEFAULT_STREAM_CHUNK_TOKENS,
+    FULL_DIFFUSION_STEPS,
     SAMPLE_FORMAT,
     SAMPLE_RATE,
     STREAM_FORMAT_MEDIA_TYPES,
     StreamMetrics,
     stream_ogg_opus,
+    validate_diffusion_steps,
     validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
     validate_stream_format,
@@ -61,6 +63,7 @@ class TtsStreamRequest(BaseModel):
     max_text_tokens_per_sentence: int = 120
     stream_chunk_tokens: int = DEFAULT_STREAM_CHUNK_TOKENS
     first_chunk_diffusion_steps: int = DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS
+    diffusion_steps: int = FULL_DIFFUSION_STEPS
     incremental_decode: bool = True
     format: str = "pcm"
     request_id: str | None = None
@@ -81,6 +84,11 @@ class TtsStreamRequest(BaseModel):
     @classmethod
     def validate_first_chunk_steps(cls, value):
         return validate_first_chunk_diffusion_steps(value)
+
+    @field_validator("diffusion_steps")
+    @classmethod
+    def validate_diffusion(cls, value):
+        return validate_diffusion_steps(value)
 
     @field_validator("format")
     @classmethod
@@ -114,6 +122,7 @@ def stream_infer_kwargs(payload: TtsStreamRequest) -> dict:
         max_text_tokens_per_sentence=payload.max_text_tokens_per_sentence,
         stream_chunk_tokens=payload.stream_chunk_tokens,
         first_chunk_diffusion_steps=payload.first_chunk_diffusion_steps,
+        diffusion_steps=payload.diffusion_steps,
         incremental_decode=payload.incremental_decode,
         request_id=payload.request_id,
     )

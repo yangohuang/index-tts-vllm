@@ -41,15 +41,23 @@ def validate_stream_chunk_tokens(value: int) -> int:
     return value
 
 
-def validate_first_chunk_diffusion_steps(value: int) -> int:
+def _validate_steps(value: int, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError("first_chunk_diffusion_steps must be an integer")
+        raise ValueError(f"{name} must be an integer")
     if not MIN_FIRST_CHUNK_DIFFUSION_STEPS <= value <= FULL_DIFFUSION_STEPS:
         raise ValueError(
-            f"first_chunk_diffusion_steps must be between "
+            f"{name} must be between "
             f"{MIN_FIRST_CHUNK_DIFFUSION_STEPS} and {FULL_DIFFUSION_STEPS}"
         )
     return value
+
+
+def validate_first_chunk_diffusion_steps(value: int) -> int:
+    return _validate_steps(value, "first_chunk_diffusion_steps")
+
+
+def validate_diffusion_steps(value: int) -> int:
+    return _validate_steps(value, "diffusion_steps")
 
 
 def should_decode_prefix(
