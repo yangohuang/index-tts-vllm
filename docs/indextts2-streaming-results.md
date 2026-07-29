@@ -103,7 +103,8 @@ length regulator → 25 步 CFM → BigVGAN），得到完整前缀波形；requ
 可逐波形对比；注意不同序号的请求是不同采样，停顿/语速本来就不同，不能用于对比）：
 增量 vs 全量（同 token）逐采样等长，能量轮廓相关 0.93–0.96，RMS 差异 <2%
 （尾部局部差异来自 CFM 重做区噪声采样），零削波；试听对照
-`outputs/bench/final_std_r1.wav`（增量）vs `ab_full_std.wav`（全量）。
+`outputs/bench/final_std_r1.wav`（增量）vs `ab_full_std.wav`（全量），
+人工试听确认无可辨差异（2026-07-29）。
 
 **负结果：参考 prompt 截短（已回退）**。既然参考 prompt 是每轮主导成本，曾尝试在
 有 ≥64 帧自体上下文后把参考截到最后 256 帧：RTF 降至 0.224（−18%），但整体 RMS
