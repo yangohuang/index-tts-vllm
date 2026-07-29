@@ -17,6 +17,15 @@ MAX_STREAM_CHUNK_TOKENS = 100
 FULL_DIFFUSION_STEPS = 25
 DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS = 15
 MIN_FIRST_CHUNK_DIFFUSION_STEPS = 5
+# Incremental prefix decoding: cached mel frames fed back to the CFM as clean
+# prompt context, so each round only generates redo + new frames.
+DEFAULT_CFM_CONTEXT_FRAMES = 128  # ~1.5 s of mel context at hop 256 / 22050 Hz
+DEFAULT_CFM_REDO_FRAMES = 16  # regenerated tail; must cover the smoother holdback (8)
+# NOTE: trimming the speaker reference prompt in incremental rounds (keeping
+# only its tail once own-speech context exists) was tried and reverted: the
+# weakened anchor lets energy drift upward round over round (see
+# docs/indextts2-streaming-results.md, iteration 4).
+DEFAULT_VOCODER_MARGIN_FRAMES = 16  # left context re-vocoded and discarded per round
 
 
 def validate_stream_chunk_tokens(value: int) -> int:
@@ -68,6 +77,58 @@ def pcm16le_bytes(waveform: torch.Tensor) -> bytes:
 class PcmChunk:
     pcm: bytes
     is_final: bool = False
+
+
+@dataclass(frozen=True)
+class MelWindowPlan:
+    """Frame bookkeeping for one incremental decode round.
+
+    ``keep_frames`` of cached mel survive unchanged; frames
+    [``window_start``, ``keep_frames``) are fed to the CFM as clean prompt
+    context; frames [``keep_frames``, ``total_frames``) are generated.
+    """
+
+    keep_frames: int
+    window_start: int
+    total_frames: int
+
+    @property
+    def context_frames(self) -> int:
+        return self.keep_frames - self.window_start
+
+    @property
+    def generated_frames(self) -> int:
+        return self.total_frames - self.keep_frames
+
+
+def plan_mel_window(
+    cached_frames: int,
+    total_frames: int,
+    context_frames: int = DEFAULT_CFM_CONTEXT_FRAMES,
+    redo_frames: int = DEFAULT_CFM_REDO_FRAMES,
+) -> MelWindowPlan:
+    if cached_frames < 0 or total_frames < 0:
+        raise ValueError("frame counts must be non-negative")
+    if context_frames < 0 or redo_frames < 0:
+        raise ValueError("context_frames and redo_frames must be non-negative")
+    keep = max(0, min(cached_frames - redo_frames, total_frames))
+    window_start = max(0, keep - context_frames)
+    return MelWindowPlan(
+        keep_frames=keep, window_start=window_start, total_frames=total_frames
+    )
+
+
+class IncrementalMelCache:
+    """Per-sentence mel + waveform cache for incremental prefix decoding."""
+
+    def __init__(self):
+        self.mel = None  # [B, n_mels, frames] or None before the first decode
+        self.wav = None  # float waveform aligned with ``mel`` (frames * hop samples)
+        self.samples_per_frame = None  # inferred from the first vocoder call
+
+    @property
+    def frames(self) -> int:
+        return 0 if self.mel is None else self.mel.size(-1)
 
 
 @dataclass

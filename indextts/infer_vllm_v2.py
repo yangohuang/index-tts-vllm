@@ -32,9 +32,12 @@ from indextts.streaming import (
     DEFAULT_STREAM_CHUNK_TOKENS,
     FULL_DIFFUSION_STEPS,
     SAMPLE_RATE as STREAM_SAMPLE_RATE,
+    DEFAULT_VOCODER_MARGIN_FRAMES,
+    IncrementalMelCache,
     PcmChunk,
     StreamingPcmSmoother,
     pcm16le_bytes,
+    plan_mel_window,
     should_decode_prefix,
     validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
@@ -607,6 +610,7 @@ class IndexTTS2:
               max_text_tokens_per_sentence=120,
               stream_chunk_tokens=DEFAULT_STREAM_CHUNK_TOKENS,
               first_chunk_diffusion_steps=DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
+              incremental_decode=True,
               request_id=None):
         """Yield PcmChunk objects of 22050 Hz mono PCM16 LE audio as tokens arrive."""
         threshold = validate_stream_chunk_tokens(stream_chunk_tokens)
@@ -645,6 +649,7 @@ class IndexTTS2:
                     request_id=active_request_id,
                 )
                 smoother = StreamingPcmSmoother(hop_length=hop_length)
+                mel_state = IncrementalMelCache() if incremental_decode else None
                 decoded_tokens = 0
                 latest_token_ids = ()
                 saw_final = False
@@ -663,6 +668,7 @@ class IndexTTS2:
                         token_chunk.token_ids,
                         speech_conditioning_latent,
                         diffusion_steps=first_steps if not request_decoded else FULL_DIFFUSION_STEPS,
+                        mel_state=mel_state,
                     )
                     request_decoded = True
                     stable = smoother.push(waveform, is_final=token_chunk.is_final)
@@ -681,6 +687,7 @@ class IndexTTS2:
                         latest_token_ids,
                         speech_conditioning_latent,
                         diffusion_steps=first_steps if not request_decoded else FULL_DIFFUSION_STEPS,
+                        mel_state=mel_state,
                     )
                     request_decoded = True
                     stable = smoother.push(waveform, is_final=True)
@@ -693,13 +700,21 @@ class IndexTTS2:
 
     @torch.no_grad()
     def _decode_stream_prefix(self, prepared: PreparedInference, text_tokens, token_ids, speech_conditioning_latent,
-                              diffusion_steps=FULL_DIFFUSION_STEPS):
+                              diffusion_steps=FULL_DIFFUSION_STEPS, mel_state=None):
         """Decode the full acoustic-token prefix to a PCM-scale float waveform.
 
         Reuses the exact non-streaming GPT-forward, gpt_layer, semantic-code
-        embedding, length regulator, CFM, and BigVGAN path; stream state is
-        never mutated here.
+        embedding, length regulator, CFM, and BigVGAN path.
+
+        With ``mel_state`` (IncrementalMelCache), previously generated mel is
+        cached: the CFM prompt becomes [speaker ref mel, cached context tail]
+        and only redo + new frames are generated, making the dominant 25-step
+        DiT cost per round O(window) instead of O(prefix). The tail redo
+        region covers the PCM smoother's holdback so committed audio is never
+        conditioned on stale right context. Without ``mel_state`` the full
+        prefix is regenerated every round (legacy behavior).
         """
+        stage_started = time.perf_counter()
         codes = torch.tensor(token_ids, device=self.device, dtype=torch.long).unsqueeze(0)
         code_lens = torch.tensor([codes.shape[-1]], device=self.device, dtype=torch.long)
         use_speed = torch.zeros(prepared.spk_cond_emb.size(0)).to(self.device).long()
@@ -727,15 +742,73 @@ class IndexTTS2:
                                                      ylens=target_lengths,
                                                      n_quantizers=3,
                                                      f0=None)[0]
-        cat_condition = torch.cat([prepared.prompt_condition, cond], dim=1)
+        gpt_seconds = time.perf_counter() - stage_started
+        plan = plan_mel_window(
+            cached_frames=mel_state.frames if mel_state is not None else 0,
+            total_frames=cond.size(1),
+        )
+        context_mel = (
+            mel_state.mel[:, :, plan.window_start:plan.keep_frames]
+            if plan.keep_frames > 0 else None
+        )
+        prompt_mel = (
+            torch.cat([prepared.ref_mel, context_mel.to(prepared.ref_mel.dtype)], dim=-1)
+            if context_mel is not None else prepared.ref_mel
+        )
+        cat_condition = torch.cat([prepared.prompt_condition, cond[:, plan.window_start:]], dim=1)
+        cfm_started = time.perf_counter()
         vc_target = self.s2mel.models['cfm'].inference(cat_condition,
                                                        torch.LongTensor([cat_condition.size(1)]).to(self.device),
-                                                       prepared.ref_mel, prepared.style, None, diffusion_steps,
+                                                       prompt_mel, prepared.style, None, diffusion_steps,
                                                        inference_cfg_rate=inference_cfg_rate)
-        vc_target = vc_target[:, :, prepared.ref_mel.size(-1):]
-        wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
+        new_mel = vc_target[:, :, prompt_mel.size(-1):]
+        mel = (
+            torch.cat([mel_state.mel[:, :, :plan.keep_frames], new_mel.to(mel_state.mel.dtype)], dim=-1)
+            if plan.keep_frames > 0 else new_mel
+        )
+        cfm_seconds = time.perf_counter() - cfm_started
+        vocoder_started = time.perf_counter()
+        wav = self._vocode_incremental(mel, plan.keep_frames, mel_state)
+        if mel_state is not None:
+            mel_state.mel = mel
         wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
-        return wav.cpu().flatten()
+        result = wav.cpu().flatten()
+        logger.info(
+            f">> stream decode round: gpt {gpt_seconds:.3f}s, "
+            f"cfm {cfm_seconds:.3f}s (mu {cat_condition.size(1)}, prompt {prompt_mel.size(-1)}), "
+            f"vocoder {time.perf_counter() - vocoder_started:.3f}s (mel {mel.size(-1)})"
+        )
+        return result
+
+    def _vocode_incremental(self, mel, keep_frames, mel_state):
+        """Vocode only [keep - margin, end) mel frames, reusing cached samples.
+
+        BigVGAN is fully convolutional with an exact per-frame upsample factor,
+        so cached waveform for kept frames is bit-stable; the margin gives new
+        frames their left receptive field and is discarded. Falls back to full
+        vocoding when the upsample factor is not exact or there is no cache.
+        """
+        if mel_state is None or keep_frames == 0 or mel_state.wav is None:
+            wav = self.bigvgan(mel.float()).flatten()
+            if mel_state is not None:
+                factor = wav.numel() // mel.size(-1)
+                if factor * mel.size(-1) == wav.numel():
+                    mel_state.samples_per_frame = factor
+                    mel_state.wav = wav
+            return wav
+        factor = mel_state.samples_per_frame
+        voc_start = max(0, keep_frames - DEFAULT_VOCODER_MARGIN_FRAMES)
+        segment = self.bigvgan(mel[:, :, voc_start:].float()).flatten()
+        if factor is None or segment.numel() != (mel.size(-1) - voc_start) * factor:
+            wav = self.bigvgan(mel.float()).flatten()
+            mel_state.wav = wav
+            return wav
+        wav = torch.cat([
+            mel_state.wav[: keep_frames * factor],
+            segment[(keep_frames - voc_start) * factor:],
+        ])
+        mel_state.wav = wav
+        return wav
 
 
 def find_most_similar_cosine(query_vector, matrix):

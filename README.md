@@ -8,7 +8,7 @@
 
 [![Streaming](https://img.shields.io/badge/TTFA-~470ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#流式-tts仅-indextts2api_server_v2py)
-[![Tests](https://img.shields.io/badge/tests-47%20passed-success)](test/)
+[![Tests](https://img.shields.io/badge/tests-59%20passed-success)](test/)
 
 本仓库 fork 自 [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm)（vLLM 加速版 IndexTTS），
 在其之上**设计并实现了完整的流式推理层**。
@@ -36,15 +36,16 @@ flowchart LR
 | 非流式 `/tts_url` | ~4020 ms | 0.17 | 必须等整句合成完 |
 | 流式（冷缓存） | ~830 ms | 0.31 | 该说话人首次请求 |
 | 流式（热缓存） | ~600 ms | 0.31 | 首包快 6.7 倍 |
-| **流式（热缓存 + 首块 15 步 CFM，默认）** | **~470 ms** | 0.27 | **首包快 8.6 倍**；首块 10 步可至 ~365 ms |
+| **流式（热缓存 + 首块 15 步 + 增量解码，默认）** | **~470 ms** | 0.25 | **首包快 8.6 倍**；首块 10 步可至 ~365 ms |
 
 ### 设计要点
 
 - **前缀重解码 + 稳定区提交**：CFM/BigVGAN 对 token 前缀整体重解码，只提交尾部 93 ms "不稳定区"之前的音频；不稳定区在下一轮携带更多右侧上下文重解码，与已提交音频做等功率交叉淡化——无爆音、无重复、无缺尾（实测边界跳变均值 ≤ 0.014 满幅，零削波）
 - **双传输共享一套引擎流**：HTTP chunked 与 WebSocket 消费同一个 `stream_infer()` 异步生成器；WS 协议为 JSON `start` → 二进制 PCM 帧 → JSON `end`（含 TTFA/RTF 等服务端指标），支持 `{"type":"cancel"}` 中途取消并级联到 vLLM `abort()`
 - **说话人条件缓存**：参考音频的 w2v-bert / campplus / length-regulator 条件按 `(路径, mtime)` LRU 缓存，全入口（HTTP/WS/非流式/WebUI）共享互通，TTFA 再降 ~250 ms
+- **增量前缀解码**：已生成的 mel 缓存后作为 CFM 的干净 prompt（拼在说话人参考之后），每轮只对「重做 16 帧 + 新增帧」做 25 步扩散；BigVGAN 同样只声码新增窗口并与波形缓存精确拼接——消除前缀重解码的 O(n²) 主项，质量与全量重解码等价（同 token 能量轮廓相关 0.96）
 - **自然背压**：vLLM 产 token 快于前缀解码，每轮解码自动吸收更多增量，吞吐不因流式塌陷
-- **TDD 全覆盖**：47 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
+- **TDD 全覆盖**：59 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
 
 📄 完整架构、逐轮迭代数据与已知限制：[docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
 
@@ -56,7 +57,7 @@ flowchart LR
 - [x] 请求级取消（WS cancel → vLLM abort）与服务端指标上报
 - [x] 说话人条件 LRU 缓存（TTFA 732 ms → 605 ms）
 - [x] 首块低步数 CFM（首个前缀解码 25 → 默认 15 步，API 可调 5–25）：TTFA 660 → 467 ms，10 步可至 ~365 ms
-- [ ] 增量前缀解码（复用条件/KV，消除 O(n²) 重解码，根治长文吞吐）
+- [x] 增量前缀解码（缓存 mel 作 CFM prompt + 窗口化 BigVGAN）：流式 RTF 0.28 → 0.25；剖析显示剩余瓶颈为参考音频的固定 prompt 开销
 - [ ] 流式容器选项：WAV 头 / Ogg-Opus，浏览器 `<audio>` 直接可播
 - [ ] 参考音频上传 / URL 接口（跨机调用免共享文件系统）
 - [ ] OpenAI 兼容流式接口（`/v1/audio/speech` + `stream=true`）
@@ -95,6 +96,7 @@ flowchart LR
 - **[2026-07-27]** IndexTTS2 token 级流式推理上线：HTTP/WS 双传输、取消、指标（TTFA ~730 ms）
 - **[2026-07-27]** 说话人条件缓存：热缓存 TTFA 降至 ~600 ms，全入口共享
 - **[2026-07-28]** 首块低步数 CFM：request 首个前缀解码默认 15 步（可调 5–25），后续轮次全步数；热缓存 TTFA 降至 ~470 ms
+- **[2026-07-29]** 增量前缀解码：mel 缓存复用为 CFM prompt + 窗口化 BigVGAN，流式 RTF 0.28 → 0.25，TTFA 与音质不变；含每轮阶段耗时剖析与参考截短负结果
 
 ## 使用步骤
 

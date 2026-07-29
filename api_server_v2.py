@@ -57,6 +57,7 @@ class TtsStreamRequest(BaseModel):
     max_text_tokens_per_sentence: int = 120
     stream_chunk_tokens: int = DEFAULT_STREAM_CHUNK_TOKENS
     first_chunk_diffusion_steps: int = DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS
+    incremental_decode: bool = True
     request_id: str | None = None
 
     @field_validator("text")
@@ -103,6 +104,7 @@ def stream_infer_kwargs(payload: TtsStreamRequest) -> dict:
         max_text_tokens_per_sentence=payload.max_text_tokens_per_sentence,
         stream_chunk_tokens=payload.stream_chunk_tokens,
         first_chunk_diffusion_steps=payload.first_chunk_diffusion_steps,
+        incremental_decode=payload.incremental_decode,
         request_id=payload.request_id,
     )
 

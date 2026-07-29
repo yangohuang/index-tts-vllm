@@ -97,6 +97,8 @@ async def main() -> None:
     parser.add_argument("--text", required=True)
     parser.add_argument("--stream-chunk-tokens", type=int, default=20)
     parser.add_argument("--first-chunk-diffusion-steps", type=int, default=None)
+    parser.add_argument("--no-incremental-decode", action="store_true",
+                        help="disable incremental prefix decoding (full redecode baseline)")
     parser.add_argument("--transport", choices=["http", "websocket"], default="http")
     parser.add_argument("--output-wav", default=None)
     args = parser.parse_args()
@@ -108,6 +110,8 @@ async def main() -> None:
     }
     if args.first_chunk_diffusion_steps is not None:
         payload["first_chunk_diffusion_steps"] = args.first_chunk_diffusion_steps
+    if args.no_incremental_decode:
+        payload["incremental_decode"] = False
     if args.transport == "http":
         _, pcm = await benchmark_http(args.base_url, payload)
     else:

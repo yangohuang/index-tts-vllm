@@ -6,12 +6,14 @@ from indextts.streaming import (
     DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS,
     DEFAULT_STREAM_CHUNK_TOKENS,
     FULL_DIFFUSION_STEPS,
+    IncrementalMelCache,
     MAX_STREAM_CHUNK_TOKENS,
     MIN_STREAM_CHUNK_TOKENS,
     PCM16_SAMPLE_WIDTH,
     StreamMetrics,
     StreamingPcmSmoother,
     pcm16le_bytes,
+    plan_mel_window,
     validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
 )
@@ -37,6 +39,48 @@ def test_validate_first_chunk_diffusion_steps_accepts_supported_values(value):
 def test_validate_first_chunk_diffusion_steps_rejects_unsupported_values(value):
     with pytest.raises(ValueError):
         validate_first_chunk_diffusion_steps(value)
+
+
+def test_plan_mel_window_first_round_decodes_everything():
+    plan = plan_mel_window(cached_frames=0, total_frames=40)
+    assert plan.keep_frames == 0
+    assert plan.window_start == 0
+    assert plan.context_frames == 0
+    assert plan.generated_frames == 40
+
+
+def test_plan_mel_window_redoes_tail_and_limits_context():
+    plan = plan_mel_window(
+        cached_frames=300, total_frames=340, context_frames=128, redo_frames=16
+    )
+    assert plan.keep_frames == 284  # 300 - 16 redo
+    assert plan.window_start == 156  # 284 - 128 context
+    assert plan.context_frames == 128
+    assert plan.generated_frames == 56  # 16 redo + 40 new
+
+
+def test_plan_mel_window_short_cache_keeps_nothing():
+    plan = plan_mel_window(
+        cached_frames=10, total_frames=50, context_frames=128, redo_frames=16
+    )
+    assert plan.keep_frames == 0
+    assert plan.window_start == 0
+    assert plan.generated_frames == 50
+
+
+def test_plan_mel_window_never_keeps_more_than_total():
+    plan = plan_mel_window(
+        cached_frames=100, total_frames=60, context_frames=128, redo_frames=16
+    )
+    assert plan.keep_frames == 60
+    assert plan.generated_frames == 0
+
+
+def test_incremental_mel_cache_reports_frames():
+    cache = IncrementalMelCache()
+    assert cache.frames == 0
+    cache.mel = torch.zeros(1, 80, 37)
+    assert cache.frames == 37
 
 
 def test_pcm16le_bytes_clips_and_encodes_little_endian():
