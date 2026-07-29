@@ -1,5 +1,7 @@
 """Transport-independent streaming primitives for IndexTTS2 PCM streaming."""
 
+import asyncio
+import struct
 from dataclasses import dataclass
 import time
 
@@ -58,6 +60,79 @@ def should_decode_prefix(
 ) -> bool:
     pending = usable_tokens - decoded_tokens
     return pending > 0 and (final or pending >= threshold)
+
+
+STREAM_FORMATS = ("pcm", "wav", "ogg_opus")
+STREAM_FORMAT_MEDIA_TYPES = {
+    "pcm": "audio/pcm",
+    "wav": "audio/wav",
+    "ogg_opus": "audio/ogg",
+}
+
+
+def validate_stream_format(value: str) -> str:
+    if value not in STREAM_FORMATS:
+        raise ValueError(f"format must be one of {', '.join(STREAM_FORMATS)}")
+    return value
+
+
+def wav_stream_header(
+    sample_rate: int = SAMPLE_RATE,
+    channels: int = CHANNELS,
+    sample_width: int = PCM16_SAMPLE_WIDTH,
+) -> bytes:
+    """RIFF/WAVE header for a stream of unknown length.
+
+    Both size fields are set to the 0xFFFFFFFF sentinel; players read until
+    EOF, which is the usual convention for live WAV streams.
+    """
+    byte_rate = sample_rate * channels * sample_width
+    return b"".join([
+        b"RIFF", struct.pack("<I", 0xFFFFFFFF), b"WAVE",
+        b"fmt ", struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,
+                             byte_rate, channels * sample_width, sample_width * 8),
+        b"data", struct.pack("<I", 0xFFFFFFFF),
+    ])
+
+
+async def stream_ogg_opus(pcm_chunks, sample_rate: int = SAMPLE_RATE, channels: int = CHANNELS):
+    """Transcode an async iterator of raw PCM16 LE chunks to an Ogg-Opus stream.
+
+    Runs ffmpeg as a subprocess with concurrent stdin feeding so the first
+    encoded page is yielded as soon as ffmpeg emits it.
+    """
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-f", "s16le", "-ar", str(sample_rate), "-ac", str(channels), "-i", "pipe:0",
+        "-c:a", "libopus", "-frame_duration", "20", "-f", "ogg",
+        "-flush_packets", "1", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+    async def feed():
+        try:
+            async for chunk in pcm_chunks:
+                process.stdin.write(chunk)
+                await process.stdin.drain()
+        finally:
+            if not process.stdin.is_closing():
+                process.stdin.close()
+
+    feeder = asyncio.create_task(feed())
+    try:
+        while True:
+            data = await process.stdout.read(4096)
+            if not data:
+                break
+            yield data
+        await feeder
+    finally:
+        feeder.cancel()
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
 
 
 def pcm16le_bytes(waveform: torch.Tensor) -> bytes:

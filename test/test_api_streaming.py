@@ -107,6 +107,63 @@ def test_http_stream_returns_pcm_headers_and_body(client):
     assert response.content == b"\x01\x00\x02\x00"
 
 
+def test_http_stream_wav_format_prepends_riff_header(client):
+    response = client.post("/tts_stream", json={
+        "text": "hello",
+        "spk_audio_path": "speaker.wav",
+        "format": "wav",
+    })
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
+    assert response.headers["x-stream-format"] == "wav"
+    assert response.content[:4] == b"RIFF"
+    assert response.content[44:] == b"\x01\x00\x02\x00"
+
+
+def test_http_stream_rejects_unknown_format(client):
+    response = client.post("/tts_stream", json={
+        "text": "hello",
+        "spk_audio_path": "speaker.wav",
+        "format": "mp3",
+    })
+    assert response.status_code == 422
+
+
+def test_openai_speech_endpoint_streams_wav_by_default(client, tmp_path):
+    voice = tmp_path / "voice.wav"
+    voice.write_bytes(b"fake")
+    response = client.post("/v1/audio/speech", json={
+        "input": "hello",
+        "voice": str(voice),
+    })
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
+    assert response.content[:4] == b"RIFF"
+    assert response.content[44:] == b"\x01\x00\x02\x00"
+    kwargs = client.fake_tts.calls[-1]
+    assert kwargs == {"spk_audio_prompt": str(voice), "text": "hello"}
+
+
+def test_openai_speech_endpoint_rejects_missing_voice(client):
+    response = client.post("/v1/audio/speech", json={
+        "input": "hello",
+        "voice": "/nonexistent/voice.wav",
+    })
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_openai_speech_endpoint_rejects_unsupported_format(client, tmp_path):
+    voice = tmp_path / "voice.wav"
+    voice.write_bytes(b"fake")
+    response = client.post("/v1/audio/speech", json={
+        "input": "hello",
+        "voice": str(voice),
+        "response_format": "mp3",
+    })
+    assert response.status_code == 422
+
+
 def test_http_stream_rejects_invalid_payload(client):
     response = client.post("/tts_stream", json={
         "text": "",

@@ -8,7 +8,7 @@
 
 [![Streaming](https://img.shields.io/badge/TTFA-~365ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#streaming-tts-indextts2-only-api_server_v2py)
-[![Tests](https://img.shields.io/badge/tests-59%20passed-success)](test/)
+[![Tests](https://img.shields.io/badge/tests-67%20passed-success)](test/)
 
 Forked from [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm) (the vLLM-accelerated IndexTTS),
 this fork **designs and implements a complete streaming inference layer** on top of it.
@@ -43,7 +43,7 @@ flowchart LR
 - **Two transports, one engine stream**: HTTP chunked and WebSocket consume the same `stream_infer()` async generator; the WS protocol is JSON `start` → binary PCM frames → JSON `end` (with server-side TTFA/RTF metrics), and `{"type":"cancel"}` cancels mid-stream, cascading to vLLM `abort()`
 - **Speaker-conditioning cache**: the reference audio's w2v-bert / campplus / length-regulator conditioning is LRU-cached by `(path, mtime)`, shared across all entry points (HTTP/WS/non-streaming/WebUI), cutting another ~250 ms off TTFA
 - **Natural backpressure**: vLLM produces tokens faster than prefix decoding consumes them, so each decode round absorbs a larger increment — throughput does not collapse under streaming
-- **TDD throughout**: 59 CPU unit tests (fake vLLM / fake engine injection) + a reproducible GPU benchmark client
+- **TDD throughout**: 67 CPU unit tests (fake vLLM / fake engine injection) + a reproducible GPU benchmark client
 
 📄 Full architecture, per-iteration measurements, and known limitations: [docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
 
@@ -56,10 +56,10 @@ flowchart LR
 - [x] Speaker-conditioning LRU cache (TTFA 732 ms → 605 ms)
 - [x] Low-step CFM for the first chunk (first prefix decode 25 → default 15 steps, API-tunable 5–25): TTFA 660 → 467 ms, ~365 ms at 10 steps
 - [x] Incremental prefix decoding (cached mel as CFM prompt + windowed BigVGAN): streaming RTF 0.28 → 0.25; profiling shows the fixed reference-prompt cost is the remaining bottleneck
-- [ ] Streaming container options: WAV header / Ogg-Opus, directly playable in browser `<audio>`
+- [x] Streaming containers: `format=pcm|wav|ogg_opus` (RIFF header / realtime ffmpeg Opus), directly playable in browser `<audio>`
 - [ ] Reference-audio upload / URL endpoint (cross-machine calls without a shared filesystem)
-- [ ] OpenAI-compatible streaming endpoint (`/v1/audio/speech` with `stream=true`)
-- [ ] Concurrent streaming session scheduling and backpressure (streaming load tests)
+- [x] OpenAI-compatible streaming endpoint `/v1/audio/speech` (validated with the official openai SDK)
+- [x] Concurrent streaming load test: aggregate throughput doubles with concurrency, practical limit ~4 streams (serial s2mel is the bottleneck)
 - [ ] API-key auth and rate limiting
 - [ ] Dockerfile / docker-compose one-command deployment
 
@@ -95,6 +95,7 @@ Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 - **[2026-07-27]** Speaker-conditioning cache: warm-cache TTFA down to ~600 ms, shared across all entry points
 - **[2026-07-28]** Low-step CFM for the first chunk: the request's first prefix decode defaults to 15 steps (tunable 5–25), later rounds use full steps; warm-cache TTFA down to ~470 ms
 - **[2026-07-29]** First-chunk default steps 15 → 10 (no audible difference in listening tests); default-config TTFA down to ~362 ms
+- **[2026-07-29]** Streaming containers (WAV/Ogg-Opus) + OpenAI-compatible streaming endpoint + concurrency load test (~4 practical streams)
 - **[2026-07-29]** Incremental prefix decoding: cached mel reused as the CFM prompt + windowed BigVGAN, streaming RTF 0.28 → 0.25 with unchanged TTFA and quality; includes per-stage profiling and a documented negative result on reference trimming
 
 ## Usage Steps

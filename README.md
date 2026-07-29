@@ -8,7 +8,7 @@
 
 [![Streaming](https://img.shields.io/badge/TTFA-~365ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#流式-tts仅-indextts2api_server_v2py)
-[![Tests](https://img.shields.io/badge/tests-59%20passed-success)](test/)
+[![Tests](https://img.shields.io/badge/tests-67%20passed-success)](test/)
 
 本仓库 fork 自 [Ksuriuri/index-tts-vllm](https://github.com/Ksuriuri/index-tts-vllm)（vLLM 加速版 IndexTTS），
 在其之上**设计并实现了完整的流式推理层**。
@@ -45,7 +45,7 @@ flowchart LR
 - **说话人条件缓存**：参考音频的 w2v-bert / campplus / length-regulator 条件按 `(路径, mtime)` LRU 缓存，全入口（HTTP/WS/非流式/WebUI）共享互通，TTFA 再降 ~250 ms
 - **增量前缀解码**：已生成的 mel 缓存后作为 CFM 的干净 prompt（拼在说话人参考之后），每轮只对「重做 16 帧 + 新增帧」做 25 步扩散；BigVGAN 同样只声码新增窗口并与波形缓存精确拼接——消除前缀重解码的 O(n²) 主项，质量与全量重解码等价（同 token 能量轮廓相关 0.96）
 - **自然背压**：vLLM 产 token 快于前缀解码，每轮解码自动吸收更多增量，吞吐不因流式塌陷
-- **TDD 全覆盖**：59 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
+- **TDD 全覆盖**：67 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
 
 📄 完整架构、逐轮迭代数据与已知限制：[docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
 
@@ -58,10 +58,10 @@ flowchart LR
 - [x] 说话人条件 LRU 缓存（TTFA 732 ms → 605 ms）
 - [x] 首块低步数 CFM（首个前缀解码 25 → 默认 15 步，API 可调 5–25）：TTFA 660 → 467 ms，10 步可至 ~365 ms
 - [x] 增量前缀解码（缓存 mel 作 CFM prompt + 窗口化 BigVGAN）：流式 RTF 0.28 → 0.25；剖析显示剩余瓶颈为参考音频的固定 prompt 开销
-- [ ] 流式容器选项：WAV 头 / Ogg-Opus，浏览器 `<audio>` 直接可播
+- [x] 流式容器选项：`format=pcm|wav|ogg_opus`，WAV 头 / ffmpeg 实时 Opus 转码，浏览器 `<audio>` 直接可播
 - [ ] 参考音频上传 / URL 接口（跨机调用免共享文件系统）
-- [ ] OpenAI 兼容流式接口（`/v1/audio/speech` + `stream=true`）
-- [ ] 多路流式会话调度与背压策略（并发流式压测）
+- [x] OpenAI 兼容流式接口 `/v1/audio/speech`（官方 openai SDK 流式实测通过）
+- [x] 并发流式压测：聚合吞吐随并发翻倍，实用上限 ~4 路（s2mel 串行是瓶颈，见下）
 - [ ] API Key 鉴权与速率限制
 - [ ] Dockerfile / docker-compose 一键部署
 
@@ -97,6 +97,7 @@ flowchart LR
 - **[2026-07-27]** 说话人条件缓存：热缓存 TTFA 降至 ~600 ms，全入口共享
 - **[2026-07-28]** 首块低步数 CFM：request 首个前缀解码默认 15 步（可调 5–25），后续轮次全步数；热缓存 TTFA 降至 ~470 ms
 - **[2026-07-29]** 首块默认步数 15 → 10（试听验证无差异），默认配置 TTFA 降至 ~362 ms
+- **[2026-07-29]** 流式容器（WAV/Ogg-Opus）+ OpenAI 兼容流式接口 + 并发压测（实用并发 ~4 路）
 - **[2026-07-29]** 增量前缀解码：mel 缓存复用为 CFM prompt + 窗口化 BigVGAN，流式 RTF 0.28 → 0.25，TTFA 与音质不变；含每轮阶段耗时剖析与参考截短负结果
 
 ## 使用步骤
@@ -212,7 +213,21 @@ python api_server_v2.py
 - `stream_chunk_tokens` 有效范围 **10–100**（默认 20）：值越小首包延迟（TTFA）越低，但总吞吐越差（前缀会被更频繁地重解码）。
 - `first_chunk_diffusion_steps` 有效范围 **5–25**（默认 10，试听验证与 25 步无可辨差异）：仅 request 的首个前缀解码使用的 CFM 步数，后续轮次固定 25 步。步数越低首包越快、开头约 0.4 s 音质略降；设为 25 即关闭该优化。
 - 情感文本模式（`emo_control_method=3`）会先调用 Qwen 情感模型，增加流式开始前的预处理延迟。
+- `format` 可选 `pcm`（默认）/ `wav`（带 RIFF 头，浏览器可直接播）/ `ogg_opus`（ffmpeg 实时转码）。
 - 原有 `/tts_url` 接口保持不变，仍返回完整 WAV。
+
+**OpenAI 兼容**：`POST /v1/audio/speech`（`voice` 传参考音频路径，`response_format` 支持 `wav`/`pcm`/`opus`）：
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:6006/v1", api_key="unused")
+with client.audio.speech.with_streaming_response.create(
+    model="index-tts-2", voice="assets/jay_promptvn.wav",
+    input="你好，世界", response_format="wav",
+) as response:
+    for chunk in response.iter_bytes():
+        play_or_buffer(chunk)
+```
 
 HTTP 示例（curl，输出为裸 PCM，可用 ffplay 播放）：
 

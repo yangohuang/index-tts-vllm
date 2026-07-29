@@ -1,3 +1,6 @@
+import asyncio
+import struct
+
 import numpy as np
 import pytest
 import torch
@@ -14,8 +17,11 @@ from indextts.streaming import (
     StreamingPcmSmoother,
     pcm16le_bytes,
     plan_mel_window,
+    stream_ogg_opus,
     validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
+    validate_stream_format,
+    wav_stream_header,
 )
 
 
@@ -81,6 +87,41 @@ def test_incremental_mel_cache_reports_frames():
     assert cache.frames == 0
     cache.mel = torch.zeros(1, 80, 37)
     assert cache.frames == 37
+
+
+def test_validate_stream_format():
+    for value in ("pcm", "wav", "ogg_opus"):
+        assert validate_stream_format(value) == value
+    with pytest.raises(ValueError):
+        validate_stream_format("mp3")
+
+
+def test_wav_stream_header_fields():
+    header = wav_stream_header()
+    assert len(header) == 44
+    assert header[:4] == b"RIFF" and header[8:12] == b"WAVE"
+    assert header[4:8] == b"\xff\xff\xff\xff"  # unknown-length sentinel
+    fmt = struct.unpack("<IHHIIHH", header[16:36])
+    assert fmt == (16, 1, 1, 22050, 22050 * 2, 2, 16)
+    assert header[36:40] == b"data" and header[40:44] == b"\xff\xff\xff\xff"
+
+
+def test_stream_ogg_opus_produces_ogg_pages():
+    async def pcm():
+        # 0.5 s of silence in two chunks
+        for _ in range(2):
+            yield b"\x00\x00" * (22050 // 4)
+
+    async def run():
+        chunks = []
+        async for data in stream_ogg_opus(pcm()):
+            chunks.append(data)
+        return b"".join(chunks)
+
+    encoded = asyncio.run(run())
+    assert encoded[:4] == b"OggS"
+    assert b"OpusHead" in encoded[:200]
+    assert b"OpusTags" in encoded
 
 
 def test_pcm16le_bytes_clips_and_encodes_little_endian():

@@ -25,9 +25,13 @@ from indextts.streaming import (
     DEFAULT_STREAM_CHUNK_TOKENS,
     SAMPLE_FORMAT,
     SAMPLE_RATE,
+    STREAM_FORMAT_MEDIA_TYPES,
     StreamMetrics,
+    stream_ogg_opus,
     validate_first_chunk_diffusion_steps,
     validate_stream_chunk_tokens,
+    validate_stream_format,
+    wav_stream_header,
 )
 
 tts = None
@@ -58,6 +62,7 @@ class TtsStreamRequest(BaseModel):
     stream_chunk_tokens: int = DEFAULT_STREAM_CHUNK_TOKENS
     first_chunk_diffusion_steps: int = DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS
     incremental_decode: bool = True
+    format: str = "pcm"
     request_id: str | None = None
 
     @field_validator("text")
@@ -76,6 +81,11 @@ class TtsStreamRequest(BaseModel):
     @classmethod
     def validate_first_chunk_steps(cls, value):
         return validate_first_chunk_diffusion_steps(value)
+
+    @field_validator("format")
+    @classmethod
+    def validate_format(cls, value):
+        return validate_stream_format(value)
 
 
 def stream_infer_kwargs(payload: TtsStreamRequest) -> dict:
@@ -206,6 +216,25 @@ async def tts_api_url(request: Request):
         )
 
 
+def formatted_stream_body(kwargs: dict, stream_format: str):
+    """Wrap the engine PCM stream in the requested container format."""
+
+    async def pcm_body():
+        async for chunk in tts.stream_infer(**kwargs):
+            yield chunk.pcm
+
+    if stream_format == "ogg_opus":
+        return stream_ogg_opus(pcm_body())
+
+    async def body():
+        if stream_format == "wav":
+            yield wav_stream_header()
+        async for chunk in pcm_body():
+            yield chunk
+
+    return body()
+
+
 @app.post("/tts_stream")
 async def tts_stream_api(payload: TtsStreamRequest):
     try:
@@ -216,20 +245,69 @@ async def tts_stream_api(payload: TtsStreamRequest):
             content={"status": "error", "error": str(ex)},
         )
 
-    async def body():
-        async for chunk in tts.stream_infer(**kwargs):
-            yield chunk.pcm
-
     return StreamingResponse(
-        body(),
-        media_type="audio/pcm",
+        formatted_stream_body(kwargs, payload.format),
+        media_type=STREAM_FORMAT_MEDIA_TYPES[payload.format],
         headers={
             "X-Audio-Sample-Rate": str(SAMPLE_RATE),
             "X-Audio-Channels": str(CHANNELS),
             "X-Audio-Sample-Format": SAMPLE_FORMAT,
+            "X-Stream-Format": payload.format,
             "X-Stream-Chunk-Tokens": str(payload.stream_chunk_tokens),
             "X-First-Chunk-Diffusion-Steps": str(payload.first_chunk_diffusion_steps),
         },
+    )
+
+
+class OpenAISpeechRequest(BaseModel):
+    """Subset of the OpenAI /v1/audio/speech schema mapped onto IndexTTS2.
+
+    ``voice`` is the speaker reference audio path; ``model`` is accepted and
+    ignored; ``response_format`` supports pcm / wav / opus (Ogg-Opus).
+    """
+
+    input: str
+    voice: str
+    model: str = "index-tts-2"
+    response_format: str = "wav"
+    speed: float = 1.0
+    stream_format: str | None = None
+
+    @field_validator("input")
+    @classmethod
+    def validate_input(cls, value):
+        if not value.strip():
+            raise ValueError("input must not be empty")
+        return value
+
+    @field_validator("response_format")
+    @classmethod
+    def validate_response_format(cls, value):
+        supported = {"pcm": "pcm", "wav": "wav", "opus": "ogg_opus"}
+        if value not in supported:
+            raise ValueError(
+                f"response_format must be one of {', '.join(supported)}"
+            )
+        return value
+
+
+@app.post("/v1/audio/speech")
+async def openai_speech_api(payload: OpenAISpeechRequest):
+    if not os.path.isfile(payload.voice):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": f"voice audio not found: {payload.voice}",
+                               "type": "invalid_request_error"}},
+        )
+    stream_format = {"pcm": "pcm", "wav": "wav", "opus": "ogg_opus"}[payload.response_format]
+    kwargs = dict(
+        spk_audio_prompt=payload.voice,
+        text=payload.input,
+    )
+    return StreamingResponse(
+        formatted_stream_body(kwargs, stream_format),
+        media_type=STREAM_FORMAT_MEDIA_TYPES[stream_format],
+        headers={"X-Stream-Format": stream_format},
     )
 
 

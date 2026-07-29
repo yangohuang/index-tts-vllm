@@ -63,6 +63,35 @@ length regulator → 25 步 CFM → BigVGAN），得到完整前缀波形；requ
 默认 `stream_chunk_tokens = 20`：TTFA 与 10 几乎相同（≈760 vs ≈730 ms），
 边界不连续度更稳定，重解码次数更少。对延迟极端敏感可用 10，注重吞吐可用 40+。
 
+## 迭代 5：流式容器、OpenAI 兼容接口与并发压测（2026-07-29）
+
+**流式容器**：`/tts_stream` 新增 `format` 字段：
+
+- `pcm`（默认，行为不变）；
+- `wav`：流首输出 44 字节 RIFF 头（长度字段用 0xFFFFFFFF 哨兵），浏览器
+  `<audio>` / ffplay 直接可播；
+- `ogg_opus`：经 ffmpeg（libopus，20 ms 帧，`-flush_packets 1`）实时转码，
+  流式友好的压缩容器。
+
+**OpenAI 兼容流式接口** `POST /v1/audio/speech`：`input`/`voice`（= 参考音频路径）/
+`model`（忽略）/`response_format`（`wav` 默认、`pcm`、`opus`）。已用官方
+`openai` SDK 的 `audio.speech.with_streaming_response.create` 实测通过。
+WebSocket 仍为裸 PCM 二进制帧（格式协商对 WS 无意义）。
+
+**并发压测**（`test/stress_streaming_v2.py`，4 段不同短文本轮转，热缓存）：
+
+| 并发 | TTFA 中位/最大 (ms) | 单流 RTF 中位 | 聚合 RTF | 结论 |
+| --- | --- | --- | --- | --- |
+| 1 | 340 / 340 | 0.25 | 0.253 | 基线 |
+| 2 | 853 / 1352 | 0.38 | 0.191 | 可用 |
+| 4 | 1309 / 2250 | 0.66 | 0.163 | 可用（单流仍快于实时） |
+| 8 | 1505 / 5638 | **1.05** | 0.126 | **单流慢于实时，会卡顿** |
+
+结论：总吞吐随并发近似翻倍（聚合 RTF 0.25 → 0.13），但**实用并发上限约 4 路**——
+gpt2 部分由 vLLM 并行，s2mel（25 步 DiT）+ BigVGAN 解码在单进程内串行排队，
+是单流延迟随并发线性劣化的根源（上游已知问题）。要突破需要 s2mel 批处理
+或多 worker 化，属后续独立工作。
+
 ## 迭代 4：增量前缀解码（2026-07-29）
 
 **动机**：每轮对完整 token 前缀重解码是 O(n²) 的（见迭代 1），流式 RTF ~0.27–0.31
