@@ -48,7 +48,7 @@ Setup: single RTX 4090, ~130-character Chinese text (~24 s of audio), median of 
 
 In one sentence: **first audio drops from 4 s to 0.37 s (11× faster), and synthesis runs 4× faster than real time throughout.** Streaming RTF (0.25) being higher than non-streaming (0.17) is the inherent cost of streaming decode, traded for first audio arriving 3.6 s earlier.
 
-### Design highlights
+### Core algorithm design
 
 - **Prefix re-decode + stable-region commit**: CFM/BigVGAN re-decode the whole token prefix, but only audio before the trailing 93 ms "unstable region" is committed; that region is re-decoded next round with more right context and crossfaded (equal-power) against committed audio — no clicks, no repeats, no missing tails (measured boundary discontinuity mean ≤ 0.014 FS, zero clipping)
 - **Two transports, one engine stream**: HTTP chunked and WebSocket consume the same `stream_infer()` async generator; the WS protocol is JSON `start` → binary PCM frames → JSON `end` (with server-side TTFA/RTF metrics), and `{"type":"cancel"}` cancels mid-stream, cascading to vLLM `abort()`

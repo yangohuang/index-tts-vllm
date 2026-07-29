@@ -49,7 +49,7 @@ flowchart LR
 
 一句话总结：**首音频延迟从 4 秒降到 0.37 秒（快 11 倍），合成全程比实时快 4 倍。**流式的 RTF（0.25）高于非流式（0.17）是流式解码的固有开销，换来的是首包提前 3.6 秒。
 
-### 设计要点
+### 核心算法设计
 
 - **前缀重解码 + 稳定区提交**：CFM/BigVGAN 对 token 前缀整体重解码，只提交尾部 93 ms "不稳定区"之前的音频；不稳定区在下一轮携带更多右侧上下文重解码，与已提交音频做等功率交叉淡化——无爆音、无重复、无缺尾（实测边界跳变均值 ≤ 0.014 满幅，零削波）
 - **双传输共享一套引擎流**：HTTP chunked 与 WebSocket 消费同一个 `stream_infer()` 异步生成器；WS 协议为 JSON `start` → 二进制 PCM 帧 → JSON `end`（含 TTFA/RTF 等服务端指标），支持 `{"type":"cancel"}` 中途取消并级联到 vLLM `abort()`
@@ -58,7 +58,7 @@ flowchart LR
 - **自然背压**：vLLM 产 token 快于前缀解码，每轮解码自动吸收更多增量，吞吐不因流式塌陷
 - **TDD 全覆盖**：67 项 CPU 单测（fake vLLM / fake 引擎注入）+ 可复现的 GPU 基准脚本
 
-📄 完整架构、逐轮迭代数据与已知限制：[docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)
+📄 完整的算法设计、性能剖析、消融实验与负结果分析：[docs/indextts2-streaming-results.md](docs/indextts2-streaming-results.md)（技术报告，含问题建模 → 方法 → 实验方法学 → 瓶颈剖析 → 未来方向）
 
 ## 🗺️ Roadmap
 
