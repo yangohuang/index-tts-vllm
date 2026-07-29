@@ -4,9 +4,9 @@
 
 # IndexTTS-vLLM · 流式推理版
 
-**IndexTTS2 的 token 级流式推理：首音频延迟 4 s → 0.47 s**
+**IndexTTS2 的 token 级流式推理：首音频延迟 4 s → 0.37 s**
 
-[![Streaming](https://img.shields.io/badge/TTFA-~470ms-brightgreen)](docs/indextts2-streaming-results.md)
+[![Streaming](https://img.shields.io/badge/TTFA-~365ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#流式-tts仅-indextts2api_server_v2py)
 [![Tests](https://img.shields.io/badge/tests-59%20passed-success)](test/)
 
@@ -36,7 +36,7 @@ flowchart LR
 | 非流式 `/tts_url` | ~4020 ms | 0.17 | 必须等整句合成完 |
 | 流式（冷缓存） | ~830 ms | 0.31 | 该说话人首次请求 |
 | 流式（热缓存） | ~600 ms | 0.31 | 首包快 6.7 倍 |
-| **流式（热缓存 + 首块 15 步 + 增量解码，默认）** | **~470 ms** | 0.25 | **首包快 8.6 倍**；首块 10 步可至 ~365 ms |
+| **流式（热缓存 + 首块 10 步 + 增量解码，默认）** | **~365 ms** | 0.25 | **首包快 11 倍** |
 
 ### 设计要点
 
@@ -96,6 +96,7 @@ flowchart LR
 - **[2026-07-27]** IndexTTS2 token 级流式推理上线：HTTP/WS 双传输、取消、指标（TTFA ~730 ms）
 - **[2026-07-27]** 说话人条件缓存：热缓存 TTFA 降至 ~600 ms，全入口共享
 - **[2026-07-28]** 首块低步数 CFM：request 首个前缀解码默认 15 步（可调 5–25），后续轮次全步数；热缓存 TTFA 降至 ~470 ms
+- **[2026-07-29]** 首块默认步数 15 → 10（试听验证无差异），默认配置 TTFA 降至 ~362 ms
 - **[2026-07-29]** 增量前缀解码：mel 缓存复用为 CFM prompt + 窗口化 BigVGAN，流式 RTF 0.28 → 0.25，TTFA 与音质不变；含每轮阶段耗时剖析与参考截短负结果
 
 ## 使用步骤
@@ -209,7 +210,7 @@ python api_server_v2.py
 
 - 输出为**无文件头**的 22050 Hz 单声道 PCM16 小端（`pcm_s16le`）裸流。
 - `stream_chunk_tokens` 有效范围 **10–100**（默认 20）：值越小首包延迟（TTFA）越低，但总吞吐越差（前缀会被更频繁地重解码）。
-- `first_chunk_diffusion_steps` 有效范围 **5–25**（默认 15）：仅 request 的首个前缀解码使用的 CFM 步数，后续轮次固定 25 步。步数越低首包越快、开头约 0.4 s 音质略降；设为 25 即关闭该优化。
+- `first_chunk_diffusion_steps` 有效范围 **5–25**（默认 10，试听验证与 25 步无可辨差异）：仅 request 的首个前缀解码使用的 CFM 步数，后续轮次固定 25 步。步数越低首包越快、开头约 0.4 s 音质略降；设为 25 即关闭该优化。
 - 情感文本模式（`emo_control_method=3`）会先调用 Qwen 情感模型，增加流式开始前的预处理延迟。
 - 原有 `/tts_url` 接口保持不变，仍返回完整 WAV。
 

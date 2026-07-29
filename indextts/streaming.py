@@ -15,7 +15,7 @@ DEFAULT_STREAM_CHUNK_TOKENS = 20
 MIN_STREAM_CHUNK_TOKENS = 10
 MAX_STREAM_CHUNK_TOKENS = 100
 FULL_DIFFUSION_STEPS = 25
-DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS = 15
+DEFAULT_FIRST_CHUNK_DIFFUSION_STEPS = 10  # 15 -> 10 after listening validation (2026-07-29)
 MIN_FIRST_CHUNK_DIFFUSION_STEPS = 5
 # Incremental prefix decoding: cached mel frames fed back to the CFM as clean
 # prompt context, so each round only generates redo + new frames.

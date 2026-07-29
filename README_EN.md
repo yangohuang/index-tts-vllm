@@ -4,9 +4,9 @@
 
 # IndexTTS-vLLM · Streaming Edition
 
-**Token-level streaming inference for IndexTTS2: time-to-first-audio 4 s → 0.47 s**
+**Token-level streaming inference for IndexTTS2: time-to-first-audio 4 s → 0.37 s**
 
-[![Streaming](https://img.shields.io/badge/TTFA-~470ms-brightgreen)](docs/indextts2-streaming-results.md)
+[![Streaming](https://img.shields.io/badge/TTFA-~365ms-brightgreen)](docs/indextts2-streaming-results.md)
 [![Transport](https://img.shields.io/badge/transport-HTTP%20%7C%20WebSocket-blue)](#streaming-tts-indextts2-only-api_server_v2py)
 [![Tests](https://img.shields.io/badge/tests-59%20passed-success)](test/)
 
@@ -35,7 +35,7 @@ flowchart LR
 | Non-streaming `/tts_url` | ~4020 ms | 0.17 | must wait for full synthesis |
 | Streaming (cold cache) | ~830 ms | 0.31 | first request for a speaker |
 | Streaming (warm cache) | ~600 ms | 0.31 | 6.7× faster first audio |
-| **Streaming (warm cache + 15-step first chunk + incremental decode, default)** | **~470 ms** | 0.25 | **8.6× faster first audio**; ~365 ms at 10 steps |
+| **Streaming (warm cache + 10-step first chunk + incremental decode, default)** | **~365 ms** | 0.25 | **11× faster first audio** |
 
 ### Design highlights
 
@@ -94,6 +94,7 @@ Inference speed improvement (Index-TTS-v1/v1.5) on a single RTX 4090:
 - **[2026-07-27]** Token-level streaming inference for IndexTTS2: HTTP/WS transports, cancellation, metrics (TTFA ~730 ms)
 - **[2026-07-27]** Speaker-conditioning cache: warm-cache TTFA down to ~600 ms, shared across all entry points
 - **[2026-07-28]** Low-step CFM for the first chunk: the request's first prefix decode defaults to 15 steps (tunable 5–25), later rounds use full steps; warm-cache TTFA down to ~470 ms
+- **[2026-07-29]** First-chunk default steps 15 → 10 (no audible difference in listening tests); default-config TTFA down to ~362 ms
 - **[2026-07-29]** Incremental prefix decoding: cached mel reused as the CFM prompt + windowed BigVGAN, streaming RTF 0.28 → 0.25 with unchanged TTFA and quality; includes per-stage profiling and a documented negative result on reference trimming
 
 ## Usage Steps
@@ -207,7 +208,7 @@ python api_server_v2.py
 
 - Output is **headerless** 22050 Hz mono PCM16 little-endian (`pcm_s16le`) raw audio.
 - Valid `stream_chunk_tokens` range is **10–100** (default 20): smaller values lower time-to-first-audio but reduce overall throughput (the prefix is re-decoded more often).
-- Valid `first_chunk_diffusion_steps` range is **5–25** (default 15): CFM steps used only for the request's first prefix decode; later rounds always use 25. Lower values cut TTFA at a slight quality cost in the opening ~0.4 s; 25 disables the optimization.
+- Valid `first_chunk_diffusion_steps` range is **5–25** (default 10, validated by listening against 25 steps): CFM steps used only for the request's first prefix decode; later rounds always use 25. Lower values cut TTFA at a slight quality cost in the opening ~0.4 s; 25 disables the optimization.
 - Emotion-text mode (`emo_control_method=3`) first calls the Qwen emotion model, adding preprocessing latency before streaming starts.
 - The existing `/tts_url` endpoint is unchanged and still returns a complete WAV response.
 
